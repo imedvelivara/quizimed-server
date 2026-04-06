@@ -13,28 +13,28 @@
 //   - Fly.io      : `fly launch` puis `fly deploy`
 //
 // Variables d'environnement :
-//   PORT              - Port du serveur (défaut: 3000)
-//   ANTHROPIC_API_KEY - Clé API Anthropic pour générer les questions
+//   PORT           - Port du serveur (défaut: 3000)
+//   GEMINI_API_KEY - Clé API Google Gemini (GRATUIT sur aistudio.google.com)
 //
 // ═══════════════════════════════════════════════════
-
+ 
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
 const { v4: uuidv4 } = require("uuid");
 const path = require("path");
-
+ 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
-
+ 
 const PORT = process.env.PORT || 3000;
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
-
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+ 
 // ─── In-memory storage ───
 const rooms = new Map();    // roomCode -> Room
 const clients = new Map();  // ws -> ClientInfo
-
+ 
 // ─── Room structure ───
 function createRoom(hostName, topic, questionCount) {
   const code = generateRoomCode();
@@ -51,7 +51,7 @@ function createRoom(hostName, topic, questionCount) {
   rooms.set(code, room);
   return room;
 }
-
+ 
 function generateRoomCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
@@ -60,18 +60,18 @@ function generateRoomCode() {
   if (rooms.has(code)) return generateRoomCode();
   return code;
 }
-
-// ─── AI Question Generation ───
+ 
+// ─── AI Question Generation (Google Gemini - 100% GRATUIT) ───
 async function generateQuestions(topic, count) {
-  if (!ANTHROPIC_API_KEY) {
-    console.log("⚠️  Pas de clé API Anthropic - utilisation de questions de démonstration");
+  if (!GEMINI_API_KEY) {
+    console.log("⚠️  Pas de clé GEMINI_API_KEY - utilisation de questions de démonstration");
     return generateDemoQuestions(topic, count);
   }
-
+ 
   const prompt = `Tu es un créateur de quiz expert. Génère exactement ${count} questions de quiz à choix multiples sur le sujet: "${topic}".
-
+ 
 IMPORTANT: Réponds UNIQUEMENT avec un tableau JSON valide, sans aucun texte avant ou après, sans backticks markdown.
-
+ 
 Chaque question doit avoir ce format exact:
 [
   {
@@ -81,36 +81,37 @@ Chaque question doit avoir ce format exact:
     "explanation": "Courte explication de la bonne réponse"
   }
 ]
-
+ 
 Le champ "correct" est l'index (0-3) de la bonne réponse.
 Questions variées en difficulté. Mauvaises réponses plausibles.
-Exactement 4 options par question. En français.`;
-
+Exactement 4 options par question. Les questions doivent être en français.`;
+ 
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 8000,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.8,
+            maxOutputTokens: 8000,
+          },
+        }),
+      }
+    );
+ 
     const data = await response.json();
-    const text = data.content.map((b) => (b.type === "text" ? b.text : "")).join("");
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
     const clean = text.replace(/```json|```/g, "").trim();
     return JSON.parse(clean);
   } catch (err) {
-    console.error("Erreur génération IA:", err);
+    console.error("Erreur génération Gemini:", err);
     return generateDemoQuestions(topic, count);
   }
 }
-
+ 
 function generateDemoQuestions(topic, count) {
   const questions = [];
   for (let i = 0; i < count; i++) {
@@ -123,7 +124,7 @@ function generateDemoQuestions(topic, count) {
   }
   return questions;
 }
-
+ 
 // ─── Broadcast to room ───
 function broadcastToRoom(roomCode, message, excludeWs = null) {
   const msg = JSON.stringify(message);
@@ -133,17 +134,17 @@ function broadcastToRoom(roomCode, message, excludeWs = null) {
     }
   }
 }
-
+ 
 function sendTo(ws, message) {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(message));
   }
 }
-
+ 
 // ─── WebSocket Handler ───
 wss.on("connection", (ws) => {
   clients.set(ws, { name: null, roomCode: null });
-
+ 
   ws.on("message", async (raw) => {
     let msg;
     try {
@@ -151,36 +152,36 @@ wss.on("connection", (ws) => {
     } catch {
       return;
     }
-
+ 
     const info = clients.get(ws);
-
+ 
     switch (msg.type) {
       // ─── CREATE ROOM ───
       case "create_room": {
         const { playerName, topic, questionCount } = msg;
         if (!playerName || !topic) return;
-
+ 
         const room = createRoom(playerName, topic, questionCount || 10);
         info.name = playerName;
         info.roomCode = room.code;
-
+ 
         sendTo(ws, {
           type: "room_created",
           roomCode: room.code,
           players: room.players,
           topic: room.topic,
         });
-
+ 
         console.log(`🏠 Salle ${room.code} créée par ${playerName} (${topic}, ${room.questionCount}q)`);
         break;
       }
-
+ 
       // ─── JOIN ROOM ───
       case "join_room": {
         const { playerName, roomCode } = msg;
         const code = roomCode?.toUpperCase();
         const room = rooms.get(code);
-
+ 
         if (!room) {
           sendTo(ws, { type: "error", message: "Salle introuvable. Vérifie le code." });
           return;
@@ -193,11 +194,11 @@ wss.on("connection", (ws) => {
           sendTo(ws, { type: "error", message: "Ce pseudo est déjà pris dans cette salle." });
           return;
         }
-
+ 
         room.players.push({ name: playerName, score: 0, finished: false });
         info.name = playerName;
         info.roomCode = code;
-
+ 
         sendTo(ws, {
           type: "room_joined",
           roomCode: code,
@@ -205,69 +206,69 @@ wss.on("connection", (ws) => {
           topic: room.topic,
           host: room.host,
         });
-
+ 
         broadcastToRoom(code, {
           type: "player_joined",
           players: room.players,
           newPlayer: playerName,
         }, ws);
-
+ 
         console.log(`👤 ${playerName} a rejoint ${code} (${room.players.length} joueurs)`);
         break;
       }
-
+ 
       // ─── START GAME ───
       case "start_game": {
         const room = rooms.get(info.roomCode);
         if (!room || room.host !== info.name) return;
-
+ 
         room.state = "generating";
         broadcastToRoom(info.roomCode, { type: "generating" });
-
+ 
         console.log(`🧠 Génération des questions pour ${info.roomCode}...`);
         const questions = await generateQuestions(room.topic, room.questionCount);
         room.questions = questions;
         room.state = "playing";
-
+ 
         // Send questions WITHOUT correct answers to players
         const safeQuestions = questions.map((q) => ({
           question: q.question,
           options: q.options,
         }));
-
+ 
         broadcastToRoom(info.roomCode, {
           type: "game_start",
           questions: safeQuestions,
           totalQuestions: questions.length,
         });
-
+ 
         // Also send to host
         sendTo(ws, {
           type: "game_start",
           questions: safeQuestions,
           totalQuestions: questions.length,
         });
-
+ 
         console.log(`🎮 Partie lancée dans ${info.roomCode} (${questions.length} questions)`);
         break;
       }
-
+ 
       // ─── SUBMIT ANSWER ───
       case "submit_answer": {
         const { questionIndex, answerIndex, timeLeft } = msg;
         const room = rooms.get(info.roomCode);
         if (!room || room.state !== "playing") return;
-
+ 
         const q = room.questions[questionIndex];
         if (!q) return;
-
+ 
         const correct = answerIndex === q.correct;
         const timeBonus = Math.round((timeLeft / 15) * 500);
         const points = correct ? 1000 + timeBonus : 0;
-
+ 
         const player = room.players.find((p) => p.name === info.name);
         if (player) player.score += points;
-
+ 
         // Send result to the player
         sendTo(ws, {
           type: "answer_result",
@@ -278,24 +279,24 @@ wss.on("connection", (ws) => {
           points,
           totalScore: player?.score || 0,
         });
-
+ 
         // Broadcast updated scores
         broadcastToRoom(info.roomCode, {
           type: "score_update",
           scores: room.players.map((p) => ({ name: p.name, score: p.score })),
         });
-
+ 
         break;
       }
-
+ 
       // ─── PLAYER FINISHED ───
       case "player_finished": {
         const room = rooms.get(info.roomCode);
         if (!room) return;
-
+ 
         const player = room.players.find((p) => p.name === info.name);
         if (player) player.finished = true;
-
+ 
         const allDone = room.players.every((p) => p.finished);
         if (allDone) {
           room.state = "results";
@@ -304,10 +305,10 @@ wss.on("connection", (ws) => {
           sendTo(ws, { type: "final_results", leaderboard });
           console.log(`🏆 Partie terminée dans ${info.roomCode}`);
         }
-
+ 
         break;
       }
-
+ 
       // ─── LEAVE ───
       case "leave": {
         handleDisconnect(ws);
@@ -315,10 +316,10 @@ wss.on("connection", (ws) => {
       }
     }
   });
-
+ 
   ws.on("close", () => handleDisconnect(ws));
 });
-
+ 
 function handleDisconnect(ws) {
   const info = clients.get(ws);
   if (info && info.roomCode) {
@@ -339,7 +340,7 @@ function handleDisconnect(ws) {
   }
   clients.delete(ws);
 }
-
+ 
 // ─── Cleanup old rooms every 30 min ───
 setInterval(() => {
   const now = Date.now();
@@ -350,10 +351,10 @@ setInterval(() => {
     }
   }
 }, 1800000);
-
+ 
 // ─── Serve static files ───
 app.use(express.static(path.join(__dirname, "public")));
-
+ 
 // ─── API endpoint for room info ───
 app.get("/api/room/:code", (req, res) => {
   const room = rooms.get(req.params.code?.toUpperCase());
@@ -365,7 +366,7 @@ app.get("/api/room/:code", (req, res) => {
     state: room.state,
   });
 });
-
+ 
 // ─── Start ───
 server.listen(PORT, () => {
   console.log(`
@@ -376,8 +377,9 @@ server.listen(PORT, () => {
   ║  Serveur lancé sur le port ${String(PORT).padEnd(5)}      ║
   ║  http://localhost:${String(PORT).padEnd(5)}               ║
   ║                                       ║
-  ${ANTHROPIC_API_KEY ? "║  ✅ Clé API Anthropic configurée       ║" : "║  ⚠️  Pas de clé API → mode démo        ║"}
+  ${GEMINI_API_KEY ? "║  ✅ Clé API Gemini configurée          ║" : "║  ⚠️  Pas de clé API → mode démo        ║"}
   ║                                       ║
   ╚═══════════════════════════════════════╝
   `);
 });
+ 
