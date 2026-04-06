@@ -99,7 +99,6 @@ label{display:block;font-size:13px;color:var(--muted);font-weight:600;margin-bot
 <div class="bg"></div>
 <div class="w">
 
-<!-- HOME -->
 <div id="home" class="v on">
   <div style="margin-top:30px"><div class="logo big"><i>Q</i><span>QUIZIMED</span></div></div>
   <p style="text-align:center;color:var(--muted);margin-top:10px;line-height:1.5">Crée un quiz sur n'importe quel sujet<br>et défie tes amis en temps réel !</p>
@@ -115,7 +114,6 @@ label{display:block;font-size:13px;color:var(--muted);font-weight:600;margin-bot
   <div class="jr"><input type="text" id="iC" placeholder="CODE" maxlength="6"><button class="btn bs" id="bJo">Rejoindre</button></div>
 </div>
 
-<!-- LOADING -->
 <div id="load" class="v fc" style="align-items:center;justify-content:center;min-height:70vh;text-align:center">
   <div>
     <div style="width:70px;height:70px;margin:0 auto 20px;border-radius:18px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;animation:pu 1.5s infinite"><span style="font-size:32px">🧠</span></div>
@@ -124,7 +122,6 @@ label{display:block;font-size:13px;color:var(--muted);font-weight:600;margin-bot
   </div>
 </div>
 
-<!-- LOBBY -->
 <div id="lob" class="v">
   <div class="logo"><i>Q</i><span>QUIZIMED</span></div>
   <div style="margin-top:24px"><div style="font-size:12px;color:var(--muted);font-weight:600;text-align:center;margin-bottom:6px">CODE DE LA PARTIE</div><div class="rc" id="lC"></div></div>
@@ -132,7 +129,7 @@ label{display:block;font-size:13px;color:var(--muted);font-weight:600;margin-bot
     <div style="text-align:center;font-weight:700;font-size:14px;margin-bottom:8px">📨 Invite tes amis</div>
     <div class="lb"><span id="lL"></span><button class="cb" id="bCL">📋 Copier le lien</button></div>
     <div class="sr">
-      <a id="bWA" target="_blank" style="background:#25D366">💬 WhatsApp</a>
+      <a id="bWA" target="_blank" rel="noopener noreferrer" style="background:#25D366">💬 WhatsApp</a>
       <button id="bCC" style="background:var(--accent2)">📝 Code</button>
     </div>
   </div>
@@ -146,7 +143,6 @@ label{display:block;font-size:13px;color:var(--muted);font-weight:600;margin-bot
   <button class="btn bs" id="bLv" style="background:transparent;color:var(--muted);margin-top:8px">← Quitter</button>
 </div>
 
-<!-- PLAY -->
 <div id="play" class="v">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
     <div class="logo"><i>Q</i><span>QUIZIMED</span></div>
@@ -161,7 +157,6 @@ label{display:block;font-size:13px;color:var(--muted);font-weight:600;margin-bot
   <div id="pSC"></div>
 </div>
 
-<!-- RESULTS -->
 <div id="res" class="v">
   <div class="logo"><i>Q</i><span>QUIZIMED</span></div>
   <div class="card" style="text-align:center;border-radius:22px;margin-top:24px">
@@ -188,54 +183,119 @@ label{display:block;font-size:13px;color:var(--muted);font-weight:600;margin-bot
 
 <script>
 const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s);
-function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 
-let ws,tmr;
-const S={n:'',topic:'',cnt:10,code:'',host:'',solo:false,qs:[],qi:0,sc:0,str:0,bst:0,ans:[],tl:15,sel:null,done:false,players:[],scores:{}};
+let ws=null,tmr=null,reconnectTimer=null,allowReconnect=true;
+
+const S={
+  n:'',topic:'',cnt:10,code:'',host:'',solo:false,
+  qs:[],qi:0,sc:0,str:0,bst:0,ans:[],tl:15,sel:null,done:false,
+  players:[],scores:{},waitingSoloStart:false
+};
 
 function show(id){$$('.v').forEach(v=>v.classList.remove('on'));$('#'+id).classList.add('on')}
-function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('on');setTimeout(()=>t.classList.remove('on'),3000)}
-function send(m){if(ws?.readyState===1)ws.send(JSON.stringify(m))}
+function toast(m){
+  const t=$('#toast');
+  t.textContent=m;
+  t.classList.add('on');
+  setTimeout(()=>t.classList.remove('on'),3000);
+}
+function send(m){
+  if(ws&&ws.readyState===1) ws.send(JSON.stringify(m));
+  else toast('Connexion au serveur indisponible.');
+}
 function isHost(){return S.host===S.n}
 
 function connect(){
+  if(ws && (ws.readyState===0 || ws.readyState===1)) return;
   const p=location.protocol==='https:'?'wss:':'ws:';
   ws=new WebSocket(p+'//'+location.host);
-  ws.onclose=()=>setTimeout(connect,3000);
-  ws.onmessage=e=>handle(JSON.parse(e.data));
+  ws.onclose=()=>{
+    ws=null;
+    if(allowReconnect){
+      clearTimeout(reconnectTimer);
+      reconnectTimer=setTimeout(connect,1500);
+    }
+  };
+  ws.onmessage=e=>{
+    try{ handle(JSON.parse(e.data)); }catch(err){ console.error(err); }
+  };
+}
+
+function reconnectFresh(){
+  allowReconnect=false;
+  clearTimeout(reconnectTimer);
+  if(ws && (ws.readyState===0 || ws.readyState===1)){
+    try{ ws.close(); }catch{}
+  }
+  ws=null;
+  setTimeout(()=>{
+    allowReconnect=true;
+    connect();
+  },200);
+}
+
+function leaveRoomAndHome(){
+  if(S.code && ws && ws.readyState===1){
+    try{ send({type:'leave'}); }catch{}
+  }
+  S.code='';S.host='';S.players=[];S.scores={};S.qs=[];S.ans=[];S.done=false;
+  show('home');
+  reconnectFresh();
 }
 
 function handle(m){
-  if(m.type==='created'){
-    S.code=m.code;S.host=m.host;S.players=m.players;S.topic=m.topic;S.cnt=m.count;
-    if(S.solo){send({type:'start'})}else{lobby();show('lob')}
+  if(m.type==='room_created'){
+    S.code=m.roomCode;S.host=m.host;S.players=m.players||[];S.topic=m.topic;S.cnt=m.questionCount||S.cnt;
+    if(S.waitingSoloStart){
+      S.waitingSoloStart=false;
+      send({type:'start_game'});
+    }else{
+      lobby();show('lob');
+    }
   }
-  else if(m.type==='joined'){
-    S.code=m.code;S.host=m.host;S.players=m.players;S.topic=m.topic;S.cnt=m.count;
+  else if(m.type==='room_joined'){
+    S.code=m.roomCode;S.host=m.host;S.players=m.players||[];S.topic=m.topic;S.cnt=m.questionCount||S.cnt;
     lobby();show('lob');
   }
-  else if(m.type==='players'){S.players=m.players;S.host=m.host;lobby()}
-  else if(m.type==='generating'){show('load')}
-  else if(m.type==='go'){
-    S.qs=m.questions;S.qi=0;S.sc=0;S.str=0;S.bst=0;S.ans=[];S.sel=null;S.done=false;
+  else if(m.type==='player_update'){
+    S.players=m.players||S.players;S.host=m.host||S.host;lobby();
+  }
+  else if(m.type==='generating'){
+    show('load');
+  }
+  else if(m.type==='game_start'){
+    S.qs=m.questions||[];S.qi=Number(m.questionIndex)||0;S.sc=0;S.str=0;S.bst=0;S.ans=[];S.sel=null;S.done=false;
+    if(m.totalQuestions) S.cnt=m.totalQuestions;
     show('play');renderQ();
   }
-  else if(m.type==='result'){showRes(m)}
-  else if(m.type==='scores'){S.scores={};m.list.forEach(s=>S.scores[s.name]=s.score);renderSc()}
-  else if(m.type==='nextq'){S.qi=m.qi;S.sel=null;S.done=false;renderQ()}
-  else if(m.type==='end'){renderEnd(m.lb);show('res')}
-  else if(m.type==='err'){toast(m.msg)}
+  else if(m.type==='answer_result'){
+    showRes(m);
+  }
+  else if(m.type==='score_update'){
+    S.scores={};(m.scores||[]).forEach(s=>S.scores[s.name]=s.score);renderSc();
+  }
+  else if(m.type==='next_question'){
+    S.qi=m.questionIndex;S.sel=null;S.done=false;renderQ();
+  }
+  else if(m.type==='final_results'){
+    renderEnd(m.leaderboard);show('res');
+  }
+  else if(m.type==='error'){
+    toast(m.message);
+  }
 }
 
 function lobby(){
-  const link=location.origin+'?join='+S.code;
+  const link=location.origin+'?join='+encodeURIComponent(S.code);
   $('#lC').textContent=S.code;$('#lL').textContent=link;
-  $('#lT').textContent=esc(S.topic);$('#lQ').textContent=S.cnt;$('#lN').textContent=S.players.length;
+  $('#lT').textContent=S.topic;$('#lQ').textContent=S.cnt;$('#lN').textContent=S.players.length;
   $('#bWA').href='https://wa.me/?text='+encodeURIComponent('Quiz QUIZIMED 🧠\nSujet: '+S.topic+'\n'+link);
   const cols=['#ef4444','#3b82f6','#10b981','#f59e0b','#8b5cf6','#ec4899'];
   let h='';
   S.players.forEach((p,i)=>{
-    h+=`<div class="pl"><div class="pi"><div class="av" style="background:${cols[i%6]}">${esc(p.name[0]).toUpperCase()}</div><span style="font-weight:600">${esc(p.name)}</span></div>${p.name===S.host?'<span class="ht">HOST</span>':''}</div>`;
+    const first=(p.name&&p.name[0])?p.name[0]:'?';
+    h+=`<div class="pl"><div class="pi"><div class="av" style="background:${cols[i%6]}">${esc(first).toUpperCase()}</div><span style="font-weight:600">${esc(p.name)}</span></div>${p.name===S.host?'<span class="ht">HOST</span>':''}</div>`;
   });
   $('#lP').innerHTML=h;
   $('#bSt').style.display=isHost()?'block':'none';
@@ -245,12 +305,12 @@ function lobby(){
 function renderQ(){
   const q=S.qs[S.qi];if(!q)return;
   S.tl=15;S.sel=null;S.done=false;
-  $('#pT').textContent=esc(S.topic);$('#pQ').textContent=esc(q.question);$('#pS').textContent=S.sc;
+  $('#pT').textContent=S.topic;$('#pQ').textContent=q.question||'';$('#pS').textContent=S.sc;
   $('#pN').textContent=(S.qi+1)+'/'+S.qs.length;$('#pF').style.width=((S.qi+1)/S.qs.length*100)+'%';
   $('#pFB').innerHTML='';$('#pSC').innerHTML='';
   const sh=['▲','◆','●','■'],cl=['r','b','y','g'];
   let h='';
-  q.options.forEach((o,i)=>{h+=`<button class="o ${cl[i]}" data-i="${i}"><span class="s">${sh[i]}</span><span class="t">${esc(o)}</span></button>`});
+  (q.options||[]).forEach((o,i)=>{h+=`<button class="o ${cl[i]}" data-i="${i}"><span class="s">${sh[i]}</span><span class="t">${esc(o)}</span></button>`});
   $('#pO').innerHTML=h;
   $$('.o').forEach(b=>b.onclick=()=>{if(!S.done)doAns(+b.dataset.i)});
   startT();
@@ -258,37 +318,40 @@ function renderQ(){
 
 function startT(){clearInterval(tmr);S.tl=15;updT();tmr=setInterval(()=>{S.tl--;updT();if(S.tl<=0){clearInterval(tmr);doAns(-1)}},1000)}
 function updT(){
-  const p=S.tl/15,c=163.36,col=p>.5?'var(--green)':p>.2?'var(--gold)':'var(--red)';
+  const p=Math.max(0,S.tl/15),c=163.36,col=p>.5?'var(--green)':p>.2?'var(--gold)':'var(--red)';
   $('#tC').setAttribute('stroke-dashoffset',c*(1-p));$('#tC').setAttribute('stroke',col);
   $('#tN').textContent=S.tl;$('#tN').style.color=col;
 }
 
 function doAns(i){
   if(S.done)return;clearInterval(tmr);S.sel=i;S.done=true;
-  send({type:'answer',qi:S.qi,ans:i,tl:Math.max(S.tl,0)});
+  send({type:'submit_answer',questionIndex:S.qi,answerIndex:i,timeLeft:Math.max(S.tl,0)});
 }
 
 function showRes(m){
-  S.sc=m.total;$('#pS').textContent=S.sc;
-  if(m.ok){S.str++;if(S.str>S.bst)S.bst=S.str}else S.str=0;
-  S.ans.push({ok:m.ok,pts:m.pts,sel:S.sel,cor:m.correct});
+  S.sc=m.totalScore;$('#pS').textContent=S.sc;
+  if(m.correct){S.str++;if(S.str>S.bst)S.bst=S.str}else S.str=0;
+  S.ans.push({ok:m.correct,pts:m.points,sel:S.sel,cor:m.correctAnswer});
 
   $$('.o').forEach((b,i)=>{
     b.style.cursor='default';b.onclick=null;
-    if(i===m.correct){b.classList.add('ok');b.innerHTML+='<span class="ic">✅</span>'}
-    else if(i===S.sel&&!m.ok){b.classList.add('ko');b.innerHTML+='<span class="ic">❌</span>'}
+    if(i===m.correctAnswer){b.classList.add('ok');b.innerHTML+='<span class="ic">✅</span>'}
+    else if(i===S.sel&&!m.correct){b.classList.add('ko');b.innerHTML+='<span class="ic">❌</span>'}
     else b.classList.add('dm');
   });
 
   const last=S.qi+1>=S.qs.length,lbl=last?'Voir les résultats 🏆':'Question suivante →';
   let nx='';
-  if(isHost())nx=`<button class="btn bp" onclick="nxt()" style="margin-top:14px">${lbl}</button>`;
-  else if(!S.solo)nx='<div style="margin-top:14px;text-align:center;color:var(--muted);padding:12px;background:rgba(255,255,255,.03);border-radius:12px">⏳ En attente de l\'hôte...</div>';
+  if(isHost())nx=`<button class="btn bp" id="nxtBtn" style="margin-top:14px">${lbl}</button>`;
+  else if(!S.solo)nx='<div style="margin-top:14px;text-align:center;color:var(--muted);padding:12px;background:rgba(255,255,255,.03);border-radius:12px">⏳ En attente de l\\'hôte...</div>';
 
-  $('#pFB').innerHTML=`<div class="fb ${m.ok?'ok':'ko'}"><div style="font-size:15px;font-weight:700;color:${m.ok?'var(--green)':'var(--red)'}">${m.ok?'🎉 Bonne réponse !':S.sel===-1?'⏰ Temps écoulé !':'😬 Mauvaise réponse'}</div>${m.expl?'<p style="font-size:13px;color:var(--muted);margin-top:4px">'+esc(m.expl)+'</p>':''}${m.ok?'<div style="font-size:13px;color:var(--gold);margin-top:4px;font-weight:600">+'+m.pts+' pts'+(S.str>=2?' · 🔥'+S.str:'')+'</div>':''}</div>${nx}`;
+  $('#pFB').innerHTML=`<div class="fb ${m.correct?'ok':'ko'}"><div style="font-size:15px;font-weight:700;color:${m.correct?'var(--green)':'var(--red)'}">${m.correct?'🎉 Bonne réponse !':S.sel===-1?'⏰ Temps écoulé !':'😬 Mauvaise réponse'}</div>${m.explanation?'<p style="font-size:13px;color:var(--muted);margin-top:4px">'+esc(m.explanation)+'</p>':''}${m.correct?'<div style="font-size:13px;color:var(--gold);margin-top:4px;font-weight:600">+'+m.points+' pts'+(S.str>=2?' · 🔥'+S.str:'')+'</div>':''}</div>${nx}`;
+
+  const btn=$('#nxtBtn');
+  if(btn) btn.onclick=nxt;
 }
 
-function nxt(){if(isHost())send({type:'next'})}
+function nxt(){if(isHost())send({type:'next_question'})}
 
 function renderSc(){
   if(S.solo)return;
@@ -302,7 +365,7 @@ function renderEnd(lb){
   const ok=S.ans.filter(a=>a.ok).length,pct=S.qs.length?Math.round(ok/S.qs.length*100):0;
   $('#rM').textContent=pct>=90?'🏆':pct>=70?'🥈':pct>=50?'🥉':'💪';
   $('#rTi').textContent=pct>=90?'Excellent !':pct>=70?'Bien joué !':pct>=50?'Pas mal !':'Continue !';
-  $('#rTo').textContent=esc(S.topic);$('#rP').textContent=S.sc;$('#rC').textContent=ok+'/'+S.qs.length;$('#rS').textContent='🔥'+S.bst;
+  $('#rTo').textContent=S.topic;$('#rP').textContent=S.sc;$('#rC').textContent=ok+'/'+S.qs.length;$('#rS').textContent='🔥'+S.bst;
   $('#bRe').style.display=S.solo?'flex':'none';
 
   if(lb?.length>1){
@@ -318,39 +381,51 @@ function renderEnd(lb){
   });$('#rRC').innerHTML=r;
 }
 
-function leave(){send({type:'leave'});S.code='';S.host='';S.players=[];S.scores={}}
-
 document.addEventListener('DOMContentLoaded',()=>{
   connect();
   const p=new URLSearchParams(location.search);
-  if(p.get('join')){$('#iC').value=p.get('join').toUpperCase();toast('Code détecté !')}
+  if(p.get('join')){$('#iC').value=p.get('join').toUpperCase().slice(0,6);toast('Code détecté !')}
+
+  $('#iC').addEventListener('input',e=>{
+    e.target.value=e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,6);
+  });
 
   $$('#cB button').forEach(b=>b.onclick=()=>{$$('#cB button').forEach(x=>x.classList.remove('on'));b.classList.add('on');S.cnt=+b.dataset.n;$('#cD').textContent=S.cnt});
 
   $('#bSo').onclick=()=>{
     S.n=$('#iN').value.trim();S.topic=$('#iT').value.trim();
     if(!S.n||!S.topic)return toast('Remplis pseudo et sujet !');
-    S.solo=true;show('load');
-    send({type:'create',name:S.n,topic:S.topic,count:S.cnt});
+    S.solo=true;
+    S.waitingSoloStart=true;
+    show('load');
+    send({type:'create_room',playerName:S.n,topic:S.topic,questionCount:S.cnt});
   };
+
   $('#bMu').onclick=()=>{
     S.n=$('#iN').value.trim();S.topic=$('#iT').value.trim();
     if(!S.n||!S.topic)return toast('Remplis pseudo et sujet !');
     S.solo=false;
-    send({type:'create',name:S.n,topic:S.topic,count:S.cnt});
+    send({type:'create_room',playerName:S.n,topic:S.topic,questionCount:S.cnt});
   };
+
   $('#bJo').onclick=()=>{
     S.n=$('#iN').value.trim();const c=$('#iC').value.trim().toUpperCase();
     if(!S.n||!c)return toast('Remplis pseudo et code !');
     S.solo=false;
-    send({type:'join',name:S.n,code:c});
+    send({type:'join_room',playerName:S.n,roomCode:c});
   };
-  $('#bSt').onclick=()=>send({type:'start'});
+
+  $('#bSt').onclick=()=>send({type:'start_game'});
   $('#bCL').onclick=()=>{navigator.clipboard?.writeText(location.origin+'?join='+S.code);toast('Lien copié !')};
   $('#bCC').onclick=()=>{navigator.clipboard?.writeText(S.code);toast('Code copié !')};
-  $('#bLv').onclick=()=>{leave();show('home')};
-  $('#bHo').onclick=()=>{leave();show('home')};
-  $('#bRe').onclick=()=>{S.qi=0;S.sc=0;S.str=0;S.bst=0;S.ans=[];S.sel=null;S.done=false;show('play');renderQ()};
+  $('#bLv').onclick=()=>leaveRoomAndHome();
+  $('#bHo').onclick=()=>leaveRoomAndHome();
+
+  $('#bRe').onclick=()=>{
+    if(!S.solo)return;
+    S.qi=0;S.sc=0;S.str=0;S.bst=0;S.ans=[];S.sel=null;S.done=false;
+    show('play');renderQ();
+  };
 });
 </script>
 </body>
