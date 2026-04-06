@@ -1,11 +1,15 @@
 {
-  "name": "quizimed",
-  "version": "2.0.0",
+  "name": "quizimed-server",
+  "version": "1.0.0",
+  "description": "QUIZIMED - Quiz multijoueur en temps réel avec génération IA",
+  "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
   "dependencies": {
-    "express": "^5.2.1",
-    "ws": "^8.20.0"
+    "express": "^4.18.2",
+    "ws": "^8.16.0",
+    "uuid": "^9.0.0"
   }
 }
