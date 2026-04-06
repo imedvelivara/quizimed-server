@@ -90,8 +90,14 @@ Exactement 4 options par question. Les questions doivent être en français.`;
 
   try {
     console.log("📡 Appel à Gemini en cours...");
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+    
+    // Try multiple models - gemini-1.5-flash has the best free quota
+    const models = ["gemini-1.5-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash"];
+    
+    for (const model of models) {
+      console.log(`🤖 Essai avec ${model}...`);
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -106,19 +112,24 @@ Exactement 4 options par question. Les questions doivent être en français.`;
     );
 
     const data = await response.json();
-    console.log("📨 Réponse Gemini status:", response.status);
-    
-    if (!response.ok) {
-      console.error("❌ Erreur Gemini:", JSON.stringify(data));
-      return generateDemoQuestions(topic, count);
+      console.log(`📨 Réponse ${model} status:`, response.status);
+      
+      if (!response.ok) {
+        console.error(`⚠️ ${model} échoué:`, data.error?.message || "erreur inconnue");
+        continue; // try next model
+      }
+      
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      console.log("✅ Réponse reçue, longueur:", text.length);
+      const clean = text.replace(/```json|```/g, "").trim();
+      return JSON.parse(clean);
     }
     
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    console.log("✅ Réponse Gemini reçue, longueur:", text.length);
-    const clean = text.replace(/```json|```/g, "").trim();
-    return JSON.parse(clean);
+    // All models failed
+    console.error("❌ Tous les modèles ont échoué");
+    return generateDemoQuestions(topic, count);
   } catch (err) {
-    console.error("❌ Erreur génération Gemini:", err);
+    console.error("❌ Erreur génération:", err);
     return generateDemoQuestions(topic, count);
   }
 }
