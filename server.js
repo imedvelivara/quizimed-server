@@ -90,11 +90,11 @@ Exactement 4 options par question. Les questions doivent être en français.`;
 
   // Modèles gratuits sur OpenRouter (essayés dans l'ordre)
   const models = [
-    "meta-llama/llama-4-maverick:free",
-    "meta-llama/llama-4-scout:free",
-    "google/gemini-2.0-flash-exp:free",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "qwen/qwen3-235b-a22b:free"
+    "openrouter/free",
+    "qwen/qwen3-coder:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "stepfun/step-3.5-flash:free"
   ];
 
   for (const model of models) {
