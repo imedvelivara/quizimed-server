@@ -180,7 +180,7 @@
     }
     .question-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
     .topic-tag { font-size: 12px; color: var(--accent-alt); font-weight: 600; text-transform: uppercase; margin-bottom: 8px; }
-    .question-text { font-size: 20px; font-weight: 700; line-height: 1.4; }
+    .question-text { font-size: 20px; font-weight: 700; line-height: 1.4; color: #e2e8f0; }
 
     .timer-ring { position: relative; width: 72px; height: 72px; flex-shrink: 0; }
     .timer-number {
@@ -193,7 +193,7 @@
       background: rgba(255,255,255,0.03); border: 2px solid rgba(255,255,255,0.08);
       border-radius: 16px; padding: 18px 16px; cursor: pointer;
       text-align: left; transition: all 0.2s; position: relative;
-      animation: fadeInUp 0.3s ease both; color: var(--text);
+      animation: fadeInUp 0.3s ease both; color: #e2e8f0 !important;
     }
     .option-btn:nth-child(1) { background: rgba(239,68,68,0.08); border-color: rgba(239,68,68,0.2); }
     .option-btn:nth-child(2) { background: rgba(59,130,246,0.08); border-color: rgba(59,130,246,0.2); }
@@ -209,7 +209,7 @@
 
     .option-content { display: flex; align-items: flex-start; gap: 10px; }
     .option-shape { font-size: 18px; font-weight: 900; line-height: 1; }
-    .option-text { font-size: 15px; font-weight: 600; line-height: 1.4; color: var(--text); }
+    .option-text { font-size: 15px; font-weight: 600; line-height: 1.4; color: #e2e8f0 !important; }
 
     .result-icon { position: absolute; top: 8px; right: 10px; font-size: 18px; }
 
@@ -542,7 +542,12 @@
         case 'room_created':
           state.roomCode = msg.roomCode; state.isHost = true;
           state.players = msg.players; state.topic = msg.topic;
-          renderLobby(); showScreen('lobby');
+          if (state._waitingSoloStart) {
+            state._waitingSoloStart = false;
+            send({ type: 'start_game' });
+          } else {
+            renderLobby(); showScreen('lobby');
+          }
           break;
 
         case 'room_joined':
@@ -661,6 +666,7 @@
       $('#progressText').textContent = `${state.currentQ + 1} / ${state.questions.length}`;
       $('#progressFill').style.width = `${((state.currentQ + 1) / state.questions.length) * 100}%`;
       $('#feedbackArea').innerHTML = '';
+      if ($('#liveAnswersArea')) $('#liveAnswersArea').innerHTML = '';
 
       if (state.streak >= 2) {
         $('#streakBadge').style.display = 'inline-block';
@@ -723,20 +729,8 @@
       clearInterval(timerInterval);
       state.selectedAnswer = idx; state.showResult = true;
 
-      // If multiplayer, send to server
-      if (state.roomCode) {
-        send({ type: 'submit_answer', questionIndex: state.currentQ, answerIndex: idx, timeLeft: state.timeLeft });
-      } else {
-        // Solo mode - process locally
-        const q = state.questions[state.currentQ];
-        const correct = idx === q.correct;
-        const timeBonus = Math.round((state.timeLeft / 15) * 500);
-        const points = correct ? 1000 + timeBonus : 0;
-        handleAnswerResult({
-          questionIndex: state.currentQ, correct, correctAnswer: q.correct,
-          explanation: q.explanation || '', points, totalScore: state.score + points,
-        });
-      }
+      // Always send to server (server handles both solo and multi)
+      send({ type: 'submit_answer', questionIndex: state.currentQ, answerIndex: idx, timeLeft: state.timeLeft });
     }
 
     function handleAnswerResult(msg) {
@@ -764,18 +758,12 @@
 
       // Feedback
       const isLast = state.currentQ + 1 >= state.questions.length;
-      const isMulti = state.roomCode && !state.isSolo;
       const nextBtnLabel = isLast ? 'Voir les résultats 🏆' : 'Question suivante →';
       
       let nextBtnHtml = '';
-      if (!isMulti) {
-        // Solo: always show button
-        nextBtnHtml = `<button class="btn btn-primary" onclick="nextQuestion()" style="margin-top: 14px;">${nextBtnLabel}</button>`;
-      } else if (state.isHost) {
-        // Multi host: show button
+      if (state.isHost) {
         nextBtnHtml = `<button class="btn btn-primary" onclick="nextQuestion()" style="margin-top: 14px;">${nextBtnLabel}</button>`;
       } else {
-        // Multi non-host: wait message
         nextBtnHtml = `<div style="margin-top: 14px; text-align: center; color: var(--muted); padding: 14px; background: rgba(255,255,255,0.03); border-radius: 12px;">⏳ En attente de l'hôte...</div>`;
       }
       
@@ -791,24 +779,12 @@
     }
 
     function nextQuestion() {
-      if (state.roomCode && !state.isSolo) {
-        // Multiplayer: host sends next_question to server, server broadcasts to all
-        if (state.isHost) {
-          send({ type: 'next_question' });
-        }
-        // Non-host players wait for server's next_question message
-        return;
+      // Always tell server to go to next question (works for both solo and multi)
+      // Solo: isHost is always true
+      // Multi: only host can call this
+      if (state.isHost) {
+        send({ type: 'next_question' });
       }
-      
-      // Solo mode
-      if (state.currentQ + 1 >= state.questions.length) {
-        send({ type: 'player_finished' });
-        renderResults([{ name: state.playerName, score: state.score }]);
-        showScreen('results'); showConfetti();
-        return;
-      }
-      state.currentQ++;
-      renderQuestion();
     }
 
     // ═══ LIVE ANSWERS ═══
@@ -927,21 +903,13 @@
         state.playerName = $('#playerName').value.trim();
         state.topic = $('#quizTopic').value.trim();
         if (!state.playerName || !state.topic) return showToast('Remplis ton pseudo et le sujet !');
-        state.roomCode = '';
         state.isSolo = true;
-        showScreen('generating');
-        // For solo, generate via server API or locally
-        // We'll use the server's generation
-        send({ type: 'create_room', playerName: state.playerName, topic: state.topic, questionCount: state.questionCount });
-        // The server will create a room, then we immediately start
         state.isHost = true;
-        // We'll start the game right after room creation in solo mode
-        const soloInterval = setInterval(() => {
-          if (state.roomCode) {
-            clearInterval(soloInterval);
-            send({ type: 'start_game' });
-          }
-        }, 200);
+        showScreen('generating');
+        $('#generatingMsg').textContent = "L'IA compose votre quiz...";
+        send({ type: 'create_room', playerName: state.playerName, topic: state.topic, questionCount: state.questionCount });
+        // Wait for room_created, then auto-start
+        state._waitingSoloStart = true;
       });
 
       // Multi
