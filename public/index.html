@@ -90,6 +90,11 @@
     .score-row.me{color:var(--accent)}
     .score-pts{font-weight:700;color:var(--gold)}
 
+    .answers{margin-top:14px;padding:12px;background:var(--card);border-radius:12px;border:1px solid rgba(255,255,255,.05);font-size:13px}
+    .answers-title{color:var(--muted);font-weight:600;margin-bottom:8px}
+    .answer-row{display:flex;justify-content:space-between;align-items:center;padding:3px 0}
+    .answer-row.me{color:var(--accent)}
+
     .medal{font-size:64px;text-align:center}
     .stats{display:flex;justify-content:center;gap:32px;margin-top:20px}
     .stat{text-align:center}
@@ -142,7 +147,7 @@
       <div style="text-align:center;font-weight:700;font-size:14px;margin-bottom:8px">📨 Invite tes amis</div>
       <div class="link-bar"><span id="lLink"></span><button class="copy-btn" id="bCL">📋 Copier le lien</button></div>
       <div class="share-row">
-        <a id="bWA" target="_blank" style="background:#25D366">💬 WhatsApp</a>
+        <a id="bWA" target="_blank" rel="noopener noreferrer" style="background:#25D366">💬 WhatsApp</a>
         <button id="bCC" style="background:var(--accent2)">📝 Code</button>
       </div>
     </div>
@@ -167,6 +172,7 @@
     </div></div>
     <div class="opts" id="pO"></div>
     <div id="pFB"></div>
+    <div id="pAN"></div>
     <div id="pSC"></div>
   </div>
 
@@ -196,63 +202,170 @@
 
 <script>
 const $=s=>document.querySelector(s), $$=s=>document.querySelectorAll(s);
-
-// XSS protection
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 
-let ws,tmr;
-const S={name:'',topic:'',count:10,code:'',host:'',isHost:false,isSolo:false,qs:[],qi:0,score:0,streak:0,best:0,ans:[],tl:15,sel:null,done:false,players:[],scores:{}};
+let ws=null,tmr=null,reconnectTimer=null,allowReconnect=true;
+
+const S={
+  name:'',topic:'',count:10,code:'',host:'',isHost:false,isSolo:false,
+  qs:[],qi:0,score:0,streak:0,best:0,ans:[],tl:15,sel:null,done:false,
+  players:[],scores:{},liveAnswers:{},waitingSoloStart:false
+};
 
 function show(id){$$('.screen').forEach(s=>s.classList.remove('active'));$('#'+id).classList.add('active')}
-function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3000)}
-function send(m){if(ws&&ws.readyState===1)ws.send(JSON.stringify(m))}
+function toast(m){
+  const t=$('#toast');
+  t.textContent=m;
+  t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'),3000);
+}
+function send(m){
+  if(ws&&ws.readyState===1) ws.send(JSON.stringify(m));
+  else toast('Connexion au serveur indisponible.');
+}
+function updateHostStatus(){S.isHost=(S.host===S.name)}
 
 function connect(){
+  if(ws && (ws.readyState===0 || ws.readyState===1)) return;
   const p=location.protocol==='https:'?'wss:':'ws:';
   ws=new WebSocket(`${p}//${location.host}`);
   ws.onopen=()=>console.log('connected');
-  ws.onclose=()=>setTimeout(connect,3000);
-  ws.onmessage=e=>handle(JSON.parse(e.data));
+  ws.onclose=()=>{
+    ws=null;
+    if(allowReconnect){
+      clearTimeout(reconnectTimer);
+      reconnectTimer=setTimeout(connect,1500);
+    }
+  };
+  ws.onmessage=e=>{
+    try{ handle(JSON.parse(e.data)); }catch(err){ console.error(err); }
+  };
 }
 
-function updateHostStatus(){
-  S.isHost=(S.host===S.name);
+function reconnectFresh(){
+  allowReconnect=false;
+  clearTimeout(reconnectTimer);
+  if(ws && (ws.readyState===0 || ws.readyState===1)){
+    try{ ws.close(); }catch{}
+  }
+  ws=null;
+  setTimeout(()=>{
+    allowReconnect=true;
+    connect();
+  },200);
+}
+
+function resetGame(){
+  clearInterval(tmr);
+  S.qs=[];S.qi=0;S.score=0;S.streak=0;S.best=0;S.ans=[];S.tl=15;S.sel=null;S.done=false;
+  S.scores={};S.liveAnswers={};
+}
+
+function resetRoom(){
+  clearInterval(tmr);
+  S.code='';S.host='';S.isHost=false;S.isSolo=false;S.players=[];S.waitingSoloStart=false;
+  resetGame();
+}
+
+function leaveRoomAndHome(){
+  if(S.code && ws && ws.readyState===1){
+    try{ send({type:'leave'}); }catch{}
+  }
+  resetRoom();
+  show('home');
+  reconnectFresh();
 }
 
 function handle(m){
   if(m.type==='room_created'){
-    S.code=m.roomCode;S.host=m.host;S.players=m.players;S.topic=m.topic;S.count=m.questionCount||S.count;
+    S.code=m.roomCode;S.host=m.host;S.players=m.players||[];S.topic=m.topic;S.count=m.questionCount||S.count;
     updateHostStatus();
-    if(S.isSolo){send({type:'start_game'})}
-    else{renderLobby();show('lobby')}
+    if(S.waitingSoloStart){
+      S.waitingSoloStart=false;
+      send({type:'start_game'});
+    }else{
+      renderLobby();show('lobby');
+    }
   }
+
   else if(m.type==='room_joined'){
-    S.code=m.roomCode;S.host=m.host;S.players=m.players;S.topic=m.topic;S.count=m.questionCount||S.count;
+    S.code=m.roomCode;S.host=m.host;S.players=m.players||[];S.topic=m.topic;S.count=m.questionCount||S.count;
     updateHostStatus();
     renderLobby();show('lobby');
   }
-  else if(m.type==='player_update'){
-    S.players=m.players;S.host=m.host;
+
+  else if(m.type==='player_joined'){
+    S.players=m.players||S.players;
+    if(m.host) S.host=m.host;
+    updateHostStatus();
+    renderLobby();
+    toast((m.newPlayer||'Un joueur')+' a rejoint !');
+  }
+
+  else if(m.type==='player_left'){
+    S.players=m.players||S.players;
+    if(m.host) S.host=m.host;
     updateHostStatus();
     renderLobby();
   }
-  else if(m.type==='generating'){show('loading')}
-  else if(m.type==='game_start'){
-    S.qs=m.questions;S.qi=0;S.score=0;S.streak=0;S.best=0;S.ans=[];S.sel=null;S.done=false;
-    show('play');renderQ();
+
+  else if(m.type==='host_changed'){
+    S.players=m.players||S.players;
+    S.host=m.host||S.host;
+    updateHostStatus();
+    renderLobby();
+    toast('Nouvel hôte : '+S.host);
   }
-  else if(m.type==='answer_result'){showResult(m)}
-  else if(m.type==='score_update'){S.scores={};m.scores.forEach(s=>S.scores[s.name]=s.score);renderScores()}
-  else if(m.type==='next_question'){S.qi=m.questionIndex;S.sel=null;S.done=false;renderQ()}
-  else if(m.type==='final_results'){renderFinal(m.leaderboard);show('results')}
-  else if(m.type==='error'){toast(m.message)}
+
+  else if(m.type==='generating'){
+    show('loading');
+  }
+
+  else if(m.type==='game_start'){
+    S.qs=m.questions||[];
+    S.qi=Number(m.questionIndex)||0;
+    S.score=0;S.streak=0;S.best=0;S.ans=[];S.sel=null;S.done=false;S.liveAnswers={};S.scores={};
+    if(m.totalQuestions) S.count=m.totalQuestions;
+    show('play');
+    renderQ();
+  }
+
+  else if(m.type==='answer_result'){
+    showResult(m);
+  }
+
+  else if(m.type==='live_answers'){
+    S.liveAnswers=m.answerStatus||{};
+    renderAnswers(m.answeredCount||0,m.totalPlayers||S.players.length);
+  }
+
+  else if(m.type==='score_update'){
+    S.scores={};
+    (m.scores||[]).forEach(s=>S.scores[s.name]=s.score);
+    renderScores();
+  }
+
+  else if(m.type==='next_question'){
+    S.qi=m.questionIndex;
+    S.sel=null;S.done=false;S.liveAnswers={};
+    renderQ();
+  }
+
+  else if(m.type==='final_results'){
+    renderFinal(m.leaderboard);
+    show('results');
+  }
+
+  else if(m.type==='error'){
+    toast(m.message);
+  }
 }
 
 function renderLobby(){
-  const link=location.origin+'?join='+S.code;
+  const link=location.origin+'?join='+encodeURIComponent(S.code);
   $('#lCode').textContent=S.code;
   $('#lLink').textContent=link;
-  $('#lT').textContent=esc(S.topic);
+  $('#lT').textContent=S.topic;
   $('#lQC').textContent=S.count;
   $('#lPC').textContent=S.players.length;
   $('#bWA').href='https://wa.me/?text='+encodeURIComponent('Rejoins mon quiz QUIZIMED! 🧠\nSujet: '+S.topic+'\n'+link);
@@ -261,7 +374,7 @@ function renderLobby(){
   let h='';
   S.players.forEach((p,i)=>{
     const isHost=p.name===S.host;
-    h+=`<div class="player"><div class="player-info"><div class="avatar" style="background:${cols[i%6]}">${esc(p.name[0]).toUpperCase()}</div><span style="font-weight:600">${esc(p.name)}</span></div>${isHost?'<span class="host-tag">HOST</span>':''}</div>`;
+    h+=`<div class="player"><div class="player-info"><div class="avatar" style="background:${cols[i%6]}">${esc((p.name||'?')[0]).toUpperCase()}</div><span style="font-weight:600">${esc(p.name)}</span></div>${isHost?'<span class="host-tag">HOST</span>':''}</div>`;
   });
   $('#lPL').innerHTML=h;
 
@@ -270,83 +383,114 @@ function renderLobby(){
 }
 
 function renderQ(){
-  const q=S.qs[S.qi];if(!q)return;
+  const q=S.qs[S.qi]; if(!q) return;
   S.tl=15;S.sel=null;S.done=false;
-  $('#pT').textContent=esc(S.topic);
-  $('#pQ').textContent=esc(q.question);
+  $('#pT').textContent=S.topic;
+  $('#pQ').textContent=q.question||'';
   $('#pS').textContent=S.score;
   $('#pP').textContent=(S.qi+1)+'/'+S.qs.length;
   $('#pF').style.width=((S.qi+1)/S.qs.length*100)+'%';
-  $('#pFB').innerHTML='';$('#pSC').innerHTML='';
+  $('#pFB').innerHTML=''; $('#pSC').innerHTML=''; $('#pAN').innerHTML='';
 
   const shapes=['▲','◆','●','■'],cls=['c1','c2','c3','c4'];
   let h='';
-  q.options.forEach((o,i)=>{
+  (q.options||[]).forEach((o,i)=>{
     h+=`<button class="opt ${cls[i]}" data-i="${i}"><span class="shape">${shapes[i]}</span><span class="txt">${esc(o)}</span></button>`;
   });
   $('#pO').innerHTML=h;
-  $$('.opt').forEach(b=>b.onclick=()=>{if(!S.done)doAnswer(parseInt(b.dataset.i))});
+  $$('.opt').forEach(b=>b.onclick=()=>{ if(!S.done) doAnswer(parseInt(b.dataset.i,10)); });
   startTimer();
 }
 
 function startTimer(){
   clearInterval(tmr);S.tl=15;updTimer();
-  tmr=setInterval(()=>{S.tl--;updTimer();if(S.tl<=0){clearInterval(tmr);doAnswer(-1)}},1000);
+  tmr=setInterval(()=>{
+    S.tl--;
+    updTimer();
+    if(S.tl<=0){
+      clearInterval(tmr);
+      doAnswer(-1);
+    }
+  },1000);
 }
 function updTimer(){
-  const p=S.tl/15,c=2*Math.PI*26,col=p>.5?'var(--green)':p>.2?'var(--gold)':'var(--red)';
-  $('#tC').setAttribute('stroke-dashoffset',c*(1-p));$('#tC').setAttribute('stroke',col);
-  $('#tN').textContent=S.tl;$('#tN').style.color=col;
+  const p=Math.max(0,S.tl/15),c=2*Math.PI*26,col=p>.5?'var(--green)':p>.2?'var(--gold)':'var(--red)';
+  $('#tC').setAttribute('stroke-dashoffset',c*(1-p));
+  $('#tC').setAttribute('stroke',col);
+  $('#tN').textContent=S.tl;
+  $('#tN').style.color=col;
 }
 
 function doAnswer(idx){
-  if(S.done)return;clearInterval(tmr);S.sel=idx;S.done=true;
-  // idx=-1 means timeout, server handles it (treats as wrong)
+  if(S.done) return;
+  clearInterval(tmr);
+  S.sel=idx;
+  S.done=true;
   send({type:'submit_answer',questionIndex:S.qi,answerIndex:idx,timeLeft:Math.max(S.tl,0)});
 }
 
 function showResult(m){
-  S.score=m.totalScore;$('#pS').textContent=S.score;
-  if(m.correct){S.streak++;if(S.streak>S.best)S.best=S.streak}else S.streak=0;
+  S.score=m.totalScore; $('#pS').textContent=S.score;
+  if(m.correct){S.streak++; if(S.streak>S.best) S.best=S.streak;} else S.streak=0;
   S.ans.push({correct:m.correct,points:m.points,selected:S.sel,correctAnswer:m.correctAnswer});
 
   $$('.opt').forEach((b,i)=>{
     b.style.cursor='default';
     if(i===m.correctAnswer){b.classList.add('correct');b.innerHTML+='<span class="icon">✅</span>'}
-    else if(i===S.sel&&!m.correct){b.classList.add('wrong');b.innerHTML+='<span class="icon">❌</span>'}
+    else if(i===S.sel && !m.correct){b.classList.add('wrong');b.innerHTML+='<span class="icon">❌</span>'}
     else b.classList.add('dim');
   });
 
   const last=S.qi+1>=S.qs.length;
   const label=last?'Voir les résultats 🏆':'Question suivante →';
   let next='';
-  if(S.isHost) next=`<button class="btn btn-p" onclick="nextQ()" style="margin-top:14px">${label}</button>`;
-  else if(!S.isSolo) next='<div style="margin-top:14px;text-align:center;color:var(--muted);padding:12px;background:rgba(255,255,255,.03);border-radius:12px">⏳ En attente de l\'hôte...</div>';
+  if(S.isHost) next=`<button class="btn btn-p" id="inlineNext" style="margin-top:14px">${label}</button>`;
+  else if(!S.isSolo) next='<div style="margin-top:14px;text-align:center;color:var(--muted);padding:12px;background:rgba(255,255,255,.03);border-radius:12px">⏳ En attente de l\\'hôte...</div>';
 
   $('#pFB').innerHTML=`<div class="fb ${m.correct?'ok':'ko'}">
     <div style="font-size:15px;font-weight:700;color:${m.correct?'var(--green)':'var(--red)'}">${m.correct?'🎉 Bonne réponse !':S.sel===-1?'⏰ Temps écoulé !':'😬 Mauvaise réponse'}</div>
     ${m.explanation?'<p style="font-size:13px;color:var(--muted);margin-top:4px">'+esc(m.explanation)+'</p>':''}
     ${m.correct?'<div style="font-size:13px;color:var(--gold);margin-top:4px;font-weight:600">+'+m.points+' pts'+(S.streak>=2?' · 🔥'+S.streak:'')+'</div>':''}
   </div>${next}`;
+
+  const btn=$('#inlineNext');
+  if(btn) btn.onclick=nextQ;
 }
 
-function nextQ(){if(S.isHost)send({type:'next_question'})}
+function nextQ(){
+  if(S.isHost) send({type:'next_question'});
+}
+
+function renderAnswers(answered,total){
+  if(S.isSolo || !S.code) return;
+  let h=`<div class="answers"><div class="answers-title">RÉPONSES EN DIRECT (${answered}/${total})</div>`;
+  S.players.forEach(p=>{
+    const a=S.liveAnswers[p.name];
+    const icon=a?'✅':'⏳';
+    h+=`<div class="answer-row ${p.name===S.name?'me':''}"><span>${esc(p.name)}</span><span>${icon}</span></div>`;
+  });
+  h+='</div>';
+  $('#pAN').innerHTML=h;
+}
 
 function renderScores(){
-  if(S.isSolo)return;
+  if(S.isSolo) return;
   const sorted=Object.entries(S.scores).sort((a,b)=>b[1]-a[1]);
   let h='<div class="scores"><div class="scores-title">SCORES EN DIRECT</div>';
-  sorted.forEach(([n,s],i)=>{h+=`<div class="score-row ${n===S.name?'me':''}">${i+1}. ${esc(n)}<span class="score-pts">${s}</span></div>`});
-  h+='</div>';$('#pSC').innerHTML=h;
+  sorted.forEach(([n,s],i)=>{h+=`<div class="score-row ${n===S.name?'me':''}"><span>${i+1}. ${esc(n)}</span><span class="score-pts">${s}</span></div>`});
+  h+='</div>';
+  $('#pSC').innerHTML=h;
 }
 
 function renderFinal(lb){
   const ok=S.ans.filter(a=>a.correct).length,pct=S.qs.length?Math.round(ok/S.qs.length*100):0;
   $('#rM').textContent=pct>=90?'🏆':pct>=70?'🥈':pct>=50?'🥉':'💪';
   $('#rTi').textContent=pct>=90?'Excellent !':pct>=70?'Bien joué !':pct>=50?'Pas mal !':'Continue !';
-  $('#rTo').textContent=esc(S.topic);$('#rP').textContent=S.score;$('#rC').textContent=ok+'/'+S.qs.length;$('#rSt').textContent='🔥'+S.best;
+  $('#rTo').textContent=S.topic;
+  $('#rP').textContent=S.score;
+  $('#rC').textContent=ok+'/'+S.qs.length;
+  $('#rSt').textContent='🔥'+S.best;
 
-  // Replay only in solo
   $('#bRe').style.display=S.isSolo?'flex':'none';
 
   if(lb&&lb.length>1){
@@ -356,49 +500,81 @@ function renderFinal(lb){
     h+='</div>';$('#rLB').innerHTML=h;
   }else $('#rLB').innerHTML='';
 
-  let r='';S.qs.forEach((q,i)=>{
+  let r='';
+  S.qs.forEach((q,i)=>{
     const a=S.ans[i];
     r+=`<div style="padding:10px 0;${i<S.qs.length-1?'border-bottom:1px solid rgba(255,255,255,.05)':''}"><div style="display:flex;gap:8px"><span>${a?.correct?'✅':'❌'}</span><div style="flex:1"><div style="font-size:14px;font-weight:600;color:#e2e8f0">${esc(q.question)}</div><div style="font-size:13px;color:var(--green);margin-top:3px">✓ ${esc(q.options[a?.correctAnswer||0])}</div>${a&&!a.correct&&a.selected>=0?'<div style="font-size:13px;color:var(--red);margin-top:2px">✗ '+esc(q.options[a.selected])+'</div>':''}</div>${a?'<span style="font-size:13px;color:var(--gold);font-weight:600">+'+a.points+'</span>':''}</div></div>`;
-  });$('#rRC').innerHTML=r;
+  });
+  $('#rRC').innerHTML=r;
 }
-
-function doLeave(){send({type:'leave'});S.code='';S.host='';S.players=[];S.scores={};S.isHost=false}
 
 document.addEventListener('DOMContentLoaded',()=>{
   connect();
-  const params=new URLSearchParams(location.search);
-  if(params.get('join')){$('#iCode').value=params.get('join').toUpperCase();toast('Code détecté !')}
 
-  $$('#cntB button').forEach(b=>b.onclick=()=>{$$('#cntB button').forEach(x=>x.classList.remove('on'));b.classList.add('on');S.count=parseInt(b.dataset.n);$('#cntD').textContent=S.count});
+  const params=new URLSearchParams(location.search);
+  if(params.get('join')){
+    $('#iCode').value=params.get('join').toUpperCase().slice(0,6);
+    toast('Code détecté !');
+  }
+
+  $('#iCode').addEventListener('input',e=>{
+    e.target.value=e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,6);
+  });
+
+  $$('#cntB button').forEach(b=>b.onclick=()=>{
+    $$('#cntB button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on');
+    S.count=parseInt(b.dataset.n,10);
+    $('#cntD').textContent=S.count;
+  });
 
   $('#bSolo').onclick=()=>{
-    S.name=$('#iName').value.trim();S.topic=$('#iTopic').value.trim();
-    if(!S.name||!S.topic)return toast('Remplis pseudo et sujet !');
-    S.isSolo=true;S.isHost=true;show('loading');
+    S.name=$('#iName').value.trim();
+    S.topic=$('#iTopic').value.trim();
+    if(!S.name||!S.topic) return toast('Remplis pseudo et sujet !');
+    S.isSolo=true;
+    S.waitingSoloStart=true;
+    S.host=S.name;
+    updateHostStatus();
     send({type:'create_room',playerName:S.name,topic:S.topic,questionCount:S.count});
   };
+
   $('#bMulti').onclick=()=>{
-    S.name=$('#iName').value.trim();S.topic=$('#iTopic').value.trim();
-    if(!S.name||!S.topic)return toast('Remplis pseudo et sujet !');
+    S.name=$('#iName').value.trim();
+    S.topic=$('#iTopic').value.trim();
+    if(!S.name||!S.topic) return toast('Remplis pseudo et sujet !');
     S.isSolo=false;
     send({type:'create_room',playerName:S.name,topic:S.topic,questionCount:S.count});
   };
+
   $('#bJoin').onclick=()=>{
-    S.name=$('#iName').value.trim();const c=$('#iCode').value.trim().toUpperCase();
-    if(!S.name||!c)return toast('Remplis pseudo et code !');
+    S.name=$('#iName').value.trim();
+    const c=$('#iCode').value.trim().toUpperCase();
+    if(!S.name||!c) return toast('Remplis pseudo et code !');
     S.isSolo=false;
     send({type:'join_room',playerName:S.name,roomCode:c});
   };
+
   $('#bSt').onclick=()=>send({type:'start_game'});
-  // Don't show loading on start click - wait for server 'generating' message
-  $('#bCL').onclick=()=>{navigator.clipboard?.writeText(location.origin+'?join='+S.code);toast('Lien copié !')};
-  $('#bCC').onclick=()=>{navigator.clipboard?.writeText(S.code);toast('Code copié !')};
-  $('#bLv').onclick=()=>{doLeave();show('home')};
-  $('#bHo').onclick=()=>{doLeave();show('home')};
+
+  $('#bCL').onclick=()=>{
+    navigator.clipboard?.writeText(location.origin+'?join='+S.code);
+    toast('Lien copié !');
+  };
+
+  $('#bCC').onclick=()=>{
+    navigator.clipboard?.writeText(S.code);
+    toast('Code copié !');
+  };
+
+  $('#bLv').onclick=()=>leaveRoomAndHome();
+  $('#bHo').onclick=()=>leaveRoomAndHome();
+
   $('#bRe').onclick=()=>{
-    // Solo replay only - reuse same questions
-    S.qi=0;S.score=0;S.streak=0;S.best=0;S.ans=[];S.sel=null;S.done=false;
-    show('play');renderQ();
+    if(!S.isSolo) return;
+    S.qi=0;S.score=0;S.streak=0;S.best=0;S.ans=[];S.sel=null;S.done=false;S.scores={};S.liveAnswers={};
+    show('play');
+    renderQ();
   };
 });
 </script>
