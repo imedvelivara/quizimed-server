@@ -30,19 +30,29 @@ function createRoom(host, topic, count) {
 // ─── AI ───
 async function generateQuestions(topic, count) {
   if (!API_KEY) return demoQs(topic, count);
-  const prompt = `Tu es un créateur de quiz expert et très rigoureux. Génère exactement ${count} questions de quiz à choix multiples sur le sujet: "${topic}".
+  const prompt = `RÔLE: Tu es un professeur expert qui crée des quiz de culture générale pour un jeu télévisé. Tes questions doivent être IRRÉPROCHABLES en termes d'exactitude.
 
-RÈGLES CRITIQUES:
-1. Chaque réponse correcte DOIT être véritablement correcte et vérifiable
-2. Ne JAMAIS inventer de fausses informations
-3. Si tu n'es pas sûr d'un fait, choisis une autre question
-4. Les 3 mauvaises réponses doivent être plausibles mais clairement incorrectes
-5. Varie les difficultés
-6. Questions en français
+SUJET: "${topic}"
+NOMBRE: Exactement ${count} questions
 
-Réponds UNIQUEMENT avec un tableau JSON, sans texte ni backticks:
-[{"question":"...","options":["A","B","C","D"],"correct":0,"explanation":"..."}]
-correct = index 0-3 de la bonne réponse.`;
+INSTRUCTIONS STRICTES:
+- Base-toi UNIQUEMENT sur des faits réels, vérifiés et largement reconnus
+- Pour les artistes/musiciens: utilise des faits sur leurs albums, singles, récompenses, collaborations, dates de sortie, records — des choses VÉRIFIABLES
+- Pour les sujets scientifiques: utilise des faits établis et consensus scientifique
+- Pour l'histoire: utilise des dates et événements documentés
+- INTERDICTION d'inventer des chiffres, des dates, des classements ou des records
+- Si une information est incertaine, NE PAS l'inclure — choisis un autre fait
+- La bonne réponse doit être INDISCUTABLE — pas d'ambiguïté possible
+- Les 3 mauvaises réponses doivent être du même type que la bonne (si la bonne est un album, les mauvaises sont aussi des albums, etc.)
+- Les mauvaises réponses doivent être FAUSSES mais CRÉDIBLES (pas absurdes)
+- Mélange les difficultés: des questions faciles que tout fan connaît, des moyennes, et des difficiles pour les experts
+- Chaque question doit tester une connaissance DIFFÉRENTE (pas 5 questions sur les albums)
+- Questions et réponses en FRANÇAIS
+
+FORMAT: Réponds UNIQUEMENT avec un tableau JSON valide. Pas de texte avant, pas de texte après, pas de backticks, pas de commentaires.
+[{"question":"La question précise ici ?","options":["Bonne réponse","Mauvaise 1","Mauvaise 2","Mauvaise 3"],"correct":0,"explanation":"Explication factuelle courte"}]
+
+ATTENTION: Le champ "correct" est l'INDEX (0, 1, 2 ou 3) de la bonne réponse dans le tableau "options". MÉLANGE la position de la bonne réponse — ne mets PAS toujours la bonne réponse en premier !`;
 
   const models = ["openrouter/free","qwen/qwen3-coder:free","nvidia/nemotron-3-super-120b-a12b:free","meta-llama/llama-3.3-70b-instruct:free","stepfun/step-3.5-flash:free"];
   for (const model of models) {
@@ -51,7 +61,7 @@ correct = index 0-3 de la bonne réponse.`;
       const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
-        body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], temperature: 0.7, max_tokens: 8000 }),
+        body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], temperature: 0.4, max_tokens: 8000 }),
       });
       if (!res.ok) { console.log(`⚠️ ${model}: ${res.status}`); continue; }
       const data = await res.json();
