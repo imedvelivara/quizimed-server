@@ -440,6 +440,7 @@
       </div>
       <div class="options-grid" id="optionsGrid"></div>
       <div id="feedbackArea"></div>
+      <div id="liveAnswersArea"></div>
       <div id="liveScoresArea"></div>
     </div>
 
@@ -478,10 +479,10 @@
     // ═══ STATE ═══
     let ws = null;
     let state = {
-      playerName: '', topic: '', questionCount: 10, roomCode: '', isHost: false,
+      playerName: '', topic: '', questionCount: 10, roomCode: '', isHost: false, isSolo: false,
       questions: [], currentQ: 0, score: 0, streak: 0, bestStreak: 0,
       answers: [], timeLeft: 15, selectedAnswer: null, showResult: false,
-      players: [], scores: {},
+      players: [], scores: {}, liveAnswers: {},
     };
     let timerInterval = null;
 
@@ -563,6 +564,7 @@
 
         case 'generating':
           showScreen('generating');
+          $('#generatingMsg').textContent = "L'IA compose votre quiz...";
           break;
 
         case 'game_start':
@@ -570,6 +572,7 @@
           state.currentQ = 0; state.score = 0; state.streak = 0;
           state.answers = []; state.timeLeft = 15;
           state.selectedAnswer = null; state.showResult = false;
+          state.liveAnswers = {};
           showScreen('play'); renderQuestion();
           break;
 
@@ -577,10 +580,23 @@
           handleAnswerResult(msg);
           break;
 
+        case 'live_answers':
+          state.liveAnswers = msg.answerStatus;
+          renderLiveAnswers(msg.answeredCount, msg.totalPlayers);
+          break;
+
         case 'score_update':
           state.scores = {};
           msg.scores.forEach(s => state.scores[s.name] = s.score);
           renderLiveScores();
+          break;
+
+        case 'next_question':
+          // Server tells everyone to move to next question
+          state.currentQ = msg.questionIndex;
+          state.selectedAnswer = null; state.showResult = false;
+          state.liveAnswers = {};
+          renderQuestion();
           break;
 
         case 'final_results':
@@ -748,6 +764,21 @@
 
       // Feedback
       const isLast = state.currentQ + 1 >= state.questions.length;
+      const isMulti = state.roomCode && !state.isSolo;
+      const nextBtnLabel = isLast ? 'Voir les résultats 🏆' : 'Question suivante →';
+      
+      let nextBtnHtml = '';
+      if (!isMulti) {
+        // Solo: always show button
+        nextBtnHtml = `<button class="btn btn-primary" onclick="nextQuestion()" style="margin-top: 14px;">${nextBtnLabel}</button>`;
+      } else if (state.isHost) {
+        // Multi host: show button
+        nextBtnHtml = `<button class="btn btn-primary" onclick="nextQuestion()" style="margin-top: 14px;">${nextBtnLabel}</button>`;
+      } else {
+        // Multi non-host: wait message
+        nextBtnHtml = `<div style="margin-top: 14px; text-align: center; color: var(--muted); padding: 14px; background: rgba(255,255,255,0.03); border-radius: 12px;">⏳ En attente de l'hôte...</div>`;
+      }
+      
       let fbHtml = `<div class="feedback-box ${msg.correct ? 'feedback-correct' : 'feedback-wrong'}" style="animation: fadeInUp 0.3s ease;">
         <div style="font-size: 15px; font-weight: 700; color: ${msg.correct ? 'var(--green)' : 'var(--red)'}; margin-bottom: 4px;">
           ${msg.correct ? '🎉 Bonne réponse !' : state.selectedAnswer === -1 ? '⏰ Temps écoulé !' : '😬 Mauvaise réponse'}
@@ -755,26 +786,53 @@
         ${msg.explanation ? `<p style="font-size: 13px; color: var(--muted); margin: 0; line-height: 1.5;">${msg.explanation}</p>` : ''}
         ${msg.correct ? `<div style="font-size: 13px; color: var(--gold); margin-top: 6px; font-weight: 600;">+${msg.points} points${state.streak >= 2 ? ` · 🔥 Série de ${state.streak}` : ''}</div>` : ''}
       </div>
-      <button class="btn btn-primary" onclick="nextQuestion()" style="margin-top: 14px;">${isLast ? 'Voir les résultats 🏆' : 'Question suivante →'}</button>`;
+      ${nextBtnHtml}`;
       $('#feedbackArea').innerHTML = fbHtml;
     }
 
     function nextQuestion() {
-      if (state.currentQ + 1 >= state.questions.length) {
-        if (state.roomCode) {
-          send({ type: 'player_finished' });
-          // Wait for server final_results
-          showScreen('generating');
-          $('#generatingMsg').textContent = 'En attente des autres joueurs...';
-        } else {
-          // Solo results
-          renderResults([{ name: state.playerName, score: state.score }]);
-          showScreen('results'); showConfetti();
+      if (state.roomCode && !state.isSolo) {
+        // Multiplayer: host sends next_question to server, server broadcasts to all
+        if (state.isHost) {
+          send({ type: 'next_question' });
         }
+        // Non-host players wait for server's next_question message
+        return;
+      }
+      
+      // Solo mode
+      if (state.currentQ + 1 >= state.questions.length) {
+        send({ type: 'player_finished' });
+        renderResults([{ name: state.playerName, score: state.score }]);
+        showScreen('results'); showConfetti();
         return;
       }
       state.currentQ++;
       renderQuestion();
+    }
+
+    // ═══ LIVE ANSWERS ═══
+    function renderLiveAnswers(answeredCount, totalPlayers) {
+      if (!state.roomCode || state.isSolo) return;
+      let html = `<div class="live-scores" style="margin-top: 12px;">
+        <div class="live-scores-title">RÉPONSES EN DIRECT (${answeredCount}/${totalPlayers})</div>`;
+      
+      state.players.forEach(p => {
+        const ans = state.liveAnswers[p.name];
+        let statusIcon = '⏳';
+        let statusColor = 'var(--muted)';
+        if (ans) {
+          statusIcon = ans.correct ? '✅' : '❌';
+          statusColor = ans.correct ? 'var(--green)' : 'var(--red)';
+        }
+        html += `<div class="live-score-row ${p.name === state.playerName ? 'me' : ''}" style="display: flex; justify-content: space-between; align-items: center;">
+          <span>${p.name}</span>
+          <span style="color: ${statusColor}; font-size: 16px;">${statusIcon}</span>
+        </div>`;
+      });
+      
+      html += '</div>';
+      if ($('#liveAnswersArea')) $('#liveAnswersArea').innerHTML = html;
     }
 
     // ═══ LIVE SCORES ═══
@@ -870,6 +928,7 @@
         state.topic = $('#quizTopic').value.trim();
         if (!state.playerName || !state.topic) return showToast('Remplis ton pseudo et le sujet !');
         state.roomCode = '';
+        state.isSolo = true;
         showScreen('generating');
         // For solo, generate via server API or locally
         // We'll use the server's generation
@@ -890,6 +949,7 @@
         state.playerName = $('#playerName').value.trim();
         state.topic = $('#quizTopic').value.trim();
         if (!state.playerName || !state.topic) return showToast('Remplis ton pseudo et le sujet !');
+        state.isSolo = false;
         send({ type: 'create_room', playerName: state.playerName, topic: state.topic, questionCount: state.questionCount });
       });
 
@@ -898,6 +958,7 @@
         state.playerName = $('#playerName').value.trim();
         const code = $('#joinCode').value.trim().toUpperCase();
         if (!state.playerName || !code) return showToast('Remplis ton pseudo et le code !');
+        state.isSolo = false;
         send({ type: 'join_room', playerName: state.playerName, roomCode: code });
       });
 
