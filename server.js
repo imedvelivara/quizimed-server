@@ -46,6 +46,8 @@ function createRoom(hostName, topic, questionCount) {
     players: [{ name: hostName, score: 0, finished: false }],
     questions: [],
     state: "lobby", // lobby | generating | playing | results
+    currentQuestion: 0,
+    answersThisRound: {}, // { playerName: { answerIndex, timeLeft, correct, points } }
     createdAt: Date.now(),
   };
   rooms.set(code, room);
@@ -253,6 +255,8 @@ wss.on("connection", (ws) => {
         const questions = await generateQuestions(room.topic, room.questionCount);
         room.questions = questions;
         room.state = "playing";
+        room.currentQuestion = 0;
+        room.answersThisRound = {};
 
         // Send questions WITHOUT correct answers to players
         const safeQuestions = questions.map((q) => ({
@@ -285,6 +289,9 @@ wss.on("connection", (ws) => {
 
         const q = room.questions[questionIndex];
         if (!q) return;
+        
+        // Prevent double answers
+        if (room.answersThisRound[info.name]) return;
 
         const correct = answerIndex === q.correct;
         const timeBonus = Math.round((timeLeft / 15) * 500);
@@ -292,8 +299,11 @@ wss.on("connection", (ws) => {
 
         const player = room.players.find((p) => p.name === info.name);
         if (player) player.score += points;
+        
+        // Store answer for this round
+        room.answersThisRound[info.name] = { answerIndex, timeLeft, correct, points };
 
-        // Send result to the player
+        // Send result to the player who answered
         sendTo(ws, {
           type: "answer_result",
           questionIndex,
@@ -304,16 +314,65 @@ wss.on("connection", (ws) => {
           totalScore: player?.score || 0,
         });
 
-        // Broadcast updated scores
+        // Broadcast live answer status to everyone (who answered, correct or not)
+        const answerStatus = {};
+        for (const [name, ans] of Object.entries(room.answersThisRound)) {
+          answerStatus[name] = { answered: true, correct: ans.correct };
+        }
+        
         broadcastToRoom(info.roomCode, {
-          type: "score_update",
-          scores: room.players.map((p) => ({ name: p.name, score: p.score })),
+          type: "live_answers",
+          answerStatus,
+          totalPlayers: room.players.length,
+          answeredCount: Object.keys(room.answersThisRound).length,
         });
+        // Also send to answerer
+        sendTo(ws, {
+          type: "live_answers",
+          answerStatus,
+          totalPlayers: room.players.length,
+          answeredCount: Object.keys(room.answersThisRound).length,
+        });
+
+        // Broadcast updated scores
+        const scores = room.players.map((p) => ({ name: p.name, score: p.score }));
+        broadcastToRoom(info.roomCode, { type: "score_update", scores });
+        sendTo(ws, { type: "score_update", scores });
 
         break;
       }
 
-      // ─── PLAYER FINISHED ───
+      // ─── NEXT QUESTION (host only) ───
+      case "next_question": {
+        const room = rooms.get(info.roomCode);
+        if (!room || room.host !== info.name || room.state !== "playing") return;
+        
+        room.currentQuestion++;
+        room.answersThisRound = {}; // Reset answers for new round
+        
+        if (room.currentQuestion >= room.questions.length) {
+          // Game over
+          room.state = "results";
+          const leaderboard = [...room.players].sort((a, b) => b.score - a.score);
+          broadcastToRoom(info.roomCode, { type: "final_results", leaderboard });
+          sendTo(ws, { type: "final_results", leaderboard });
+          console.log(`🏆 Partie terminée dans ${info.roomCode}`);
+        } else {
+          // Send next question to everyone
+          broadcastToRoom(info.roomCode, { 
+            type: "next_question", 
+            questionIndex: room.currentQuestion 
+          });
+          sendTo(ws, { 
+            type: "next_question", 
+            questionIndex: room.currentQuestion 
+          });
+          console.log(`➡️ Question ${room.currentQuestion + 1} dans ${info.roomCode}`);
+        }
+        break;
+      }
+
+      // ─── PLAYER FINISHED (solo mode) ───
       case "player_finished": {
         const room = rooms.get(info.roomCode);
         if (!room) return;
@@ -321,13 +380,11 @@ wss.on("connection", (ws) => {
         const player = room.players.find((p) => p.name === info.name);
         if (player) player.finished = true;
 
-        const allDone = room.players.every((p) => p.finished);
-        if (allDone) {
+        // In solo mode, finish immediately
+        if (room.players.length === 1) {
           room.state = "results";
           const leaderboard = [...room.players].sort((a, b) => b.score - a.score);
-          broadcastToRoom(info.roomCode, { type: "final_results", leaderboard });
           sendTo(ws, { type: "final_results", leaderboard });
-          console.log(`🏆 Partie terminée dans ${info.roomCode}`);
         }
 
         break;
