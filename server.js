@@ -1,82 +1,225 @@
 // ═══════════════════════════════════════════════════
 // QUIZIMED SERVER - Multijoueur en temps réel
+// Version corrigée
 // ═══════════════════════════════════════════════════
-// 
-// Pour lancer :
-//   1. npm install
-//   2. npm start
-//   3. Ouvrir http://localhost:3000
 //
-// Pour déployer (gratuit) :
-//   - Railway.app : connecte ton repo GitHub, déploie en 1 clic
-//   - Render.com  : pareil, gratuit pour les petits projets
-//   - Fly.io      : `fly launch` puis `fly deploy`
+// Lancement :
+//   1. npm install express ws
+//   2. node server.js
 //
 // Variables d'environnement :
-//   PORT           - Port du serveur (défaut: 3000)
-//   OPENROUTER_API_KEY - Clé API OpenRouter (GRATUIT sur openrouter.ai)
+//   PORT
+//   OPENROUTER_API_KEY
 //
+// Recommandé : Node.js 18+
 // ═══════════════════════════════════════════════════
 
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
-const { v4: uuidv4 } = require("uuid");
 const path = require("path");
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 
-// ─── In-memory storage ───
-const rooms = new Map();    // roomCode -> Room
-const clients = new Map();  // ws -> ClientInfo
+const rooms = new Map();    // roomCode -> room
+const clients = new Map();  // ws -> { name, roomCode, isAlive }
 
-// ─── Room structure ───
+// ───────────────────────────────────────────────────
+// Utils
+// ───────────────────────────────────────────────────
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function sanitizePlayerName(value) {
+  if (!isNonEmptyString(value)) return null;
+  const name = value.trim().replace(/\s+/g, " ");
+  if (name.length < 2 || name.length > 20) return null;
+  return name;
+}
+
+function sanitizeTopic(value) {
+  if (!isNonEmptyString(value)) return null;
+  const topic = value.trim().replace(/\s+/g, " ");
+  if (topic.length < 2 || topic.length > 120) return null;
+  return topic;
+}
+
+function sanitizeQuestionCount(value) {
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return 10;
+  return Math.max(1, Math.min(30, n));
+}
+
+function sanitizeAnswerIndex(value) {
+  const n = Number(value);
+  if (!Number.isInteger(n)) return -1;
+  return n;
+}
+
+function sanitizeTimeLeft(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(15, n));
+}
+
+function generateRoomCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let attempts = 0;
+
+  while (attempts < 1000) {
+    let code = "";
+    for (let i = 0; i < 6; i++) {
+      code += chars[Math.floor(Math.random() * chars.length)];
+    }
+    if (!rooms.has(code)) return code;
+    attempts++;
+  }
+
+  throw new Error("Impossible de générer un code de salle unique");
+}
+
 function createRoom(hostName, topic, questionCount) {
   const code = generateRoomCode();
+
   const room = {
     code,
     host: hostName,
     topic,
     questionCount,
-    players: [{ name: hostName, score: 0, finished: false }],
+    players: [
+      {
+        name: hostName,
+        score: 0,
+        finished: false,
+      },
+    ],
     questions: [],
     state: "lobby", // lobby | generating | playing | results
     currentQuestion: 0,
     answersThisRound: {}, // { playerName: { answerIndex, timeLeft, correct, points } }
     createdAt: Date.now(),
+    updatedAt: Date.now(),
   };
+
   rooms.set(code, room);
   return room;
 }
 
-function generateRoomCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let code = "";
-  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
-  // Ensure unique
-  if (rooms.has(code)) return generateRoomCode();
-  return code;
+function touchRoom(room) {
+  room.updatedAt = Date.now();
 }
 
-// ─── AI Question Generation (OpenRouter - modèles gratuits) ───
+function sendTo(ws, message) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify(message));
+  } catch (err) {
+    console.error("Erreur sendTo:", err.message);
+  }
+}
+
+function broadcastToRoom(roomCode, message, excludeWs = null) {
+  const payload = JSON.stringify(message);
+
+  for (const [ws, info] of clients.entries()) {
+    if (info.roomCode !== roomCode) continue;
+    if (excludeWs && ws === excludeWs) continue;
+    if (ws.readyState !== WebSocket.OPEN) continue;
+
+    try {
+      ws.send(payload);
+    } catch (err) {
+      console.error("Erreur broadcastToRoom:", err.message);
+    }
+  }
+}
+
+function findPlayer(room, playerName) {
+  return room.players.find((p) => p.name === playerName);
+}
+
+function getPublicPlayers(room) {
+  return room.players.map((p) => ({
+    name: p.name,
+    score: p.score,
+    finished: p.finished,
+  }));
+}
+
+function getScoreboard(room) {
+  return room.players.map((p) => ({
+    name: p.name,
+    score: p.score,
+  }));
+}
+
+function getLeaderboard(room) {
+  return [...room.players].sort((a, b) => b.score - a.score);
+}
+
+// ───────────────────────────────────────────────────
+// AI Questions
+// ───────────────────────────────────────────────────
+
+function validateQuestions(rawQuestions, expectedCount) {
+  if (!Array.isArray(rawQuestions)) return null;
+
+  const cleaned = [];
+
+  for (const item of rawQuestions) {
+    if (!item || typeof item !== "object") continue;
+
+    const question =
+      typeof item.question === "string" ? item.question.trim() : "";
+    const explanation =
+      typeof item.explanation === "string" ? item.explanation.trim() : "";
+    const options = Array.isArray(item.options)
+      ? item.options.map((opt) => (typeof opt === "string" ? opt.trim() : ""))
+      : [];
+    const correct = Number(item.correct);
+
+    if (!question) continue;
+    if (!Array.isArray(options) || options.length !== 4) continue;
+    if (options.some((opt) => !opt)) continue;
+    if (!Number.isInteger(correct) || correct < 0 || correct > 3) continue;
+
+    cleaned.push({
+      question,
+      options,
+      correct,
+      explanation: explanation || "Pas d'explication disponible.",
+    });
+  }
+
+  if (cleaned.length === 0) return null;
+
+  return cleaned.slice(0, expectedCount);
+}
+
 async function generateQuestions(topic, count) {
   console.log(`🔑 OPENROUTER_API_KEY présente: ${OPENROUTER_API_KEY ? "OUI" : "NON"}`);
-  
+
   if (!OPENROUTER_API_KEY) {
-    console.log("⚠️  Pas de clé OPENROUTER_API_KEY - utilisation de questions de démonstration");
+    console.log("⚠️ Pas de clé OPENROUTER_API_KEY, utilisation de questions de démonstration");
     return generateDemoQuestions(topic, count);
   }
 
-  const prompt = `Tu es un créateur de quiz expert. Génère exactement ${count} questions de quiz à choix multiples sur le sujet: "${topic}".
+  const prompt = `Tu es un créateur de quiz expert.
+Génère exactement ${count} questions de quiz à choix multiples sur le sujet "${topic}".
 
-IMPORTANT: Réponds UNIQUEMENT avec un tableau JSON valide, sans aucun texte avant ou après, sans backticks markdown.
+Réponds UNIQUEMENT avec un tableau JSON valide.
+Aucun texte avant.
+Aucun texte après.
+Aucun markdown.
 
-Chaque question doit avoir ce format exact:
+Format exact attendu :
 [
   {
     "question": "La question ici ?",
@@ -86,51 +229,78 @@ Chaque question doit avoir ce format exact:
   }
 ]
 
-Le champ "correct" est l'index (0-3) de la bonne réponse.
-Questions variées en difficulté. Mauvaises réponses plausibles.
-Exactement 4 options par question. Les questions doivent être en français.`;
+Contraintes :
+- Français
+- Exactement 4 options par question
+- "correct" est un index de 0 à 3
+- Mauvaises réponses plausibles
+- Questions variées
+- Pas de doublons`;
 
-  // Modèles gratuits sur OpenRouter (essayés dans l'ordre)
   const models = [
     "openrouter/free",
     "qwen/qwen3-coder:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
     "meta-llama/llama-3.3-70b-instruct:free",
-    "stepfun/step-3.5-flash:free"
+    "stepfun/step-3.5-flash:free",
   ];
 
   for (const model of models) {
     try {
       console.log(`🤖 Essai avec ${model}...`);
+
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
         },
         body: JSON.stringify({
-          model: model,
+          model,
           messages: [{ role: "user", content: prompt }],
-          temperature: 0.8,
-          max_tokens: 8000,
+          temperature: 0.7,
+          max_tokens: 4000,
         }),
       });
 
-      const data = await response.json();
+      const data = await response.json().catch(() => null);
+
       console.log(`📨 Réponse ${model} status:`, response.status);
 
       if (!response.ok) {
-        console.error(`⚠️ ${model} échoué:`, data.error?.message || JSON.stringify(data));
+        console.error(`⚠️ ${model} échoué:`, data?.error?.message || JSON.stringify(data));
         continue;
       }
 
-      const text = data.choices?.[0]?.message?.content || "";
-      console.log("✅ Réponse reçue, longueur:", text.length);
-      const clean = text.replace(/```json|```/g, "").trim();
-      return JSON.parse(clean);
+      const text = data?.choices?.[0]?.message?.content || "";
+      if (!text) {
+        console.error(`⚠️ ${model} a renvoyé une réponse vide`);
+        continue;
+      }
+
+      const clean = text.replace(/```json|```/gi, "").trim();
+      let parsed;
+
+      try {
+        parsed = JSON.parse(clean);
+      } catch (err) {
+        console.error(`⚠️ ${model} JSON invalide:`, err.message);
+        continue;
+      }
+
+      const validated = validateQuestions(parsed, count);
+      if (!validated || validated.length === 0) {
+        console.error(`⚠️ ${model} a renvoyé un format de questions invalide`);
+        continue;
+      }
+
+      if (validated.length < count) {
+        console.warn(`⚠️ ${model} n'a renvoyé que ${validated.length}/${count} questions valides`);
+      }
+
+      return validated;
     } catch (err) {
       console.error(`⚠️ ${model} erreur:`, err.message);
-      continue;
     }
   }
 
@@ -140,326 +310,487 @@ Exactement 4 options par question. Les questions doivent être en français.`;
 
 function generateDemoQuestions(topic, count) {
   const questions = [];
+
   for (let i = 0; i < count; i++) {
     questions.push({
-      question: `Question ${i + 1} sur "${topic}" (démo - ajoutez OPENROUTER_API_KEY pour de vraies questions)`,
+      question: `Question ${i + 1} sur "${topic}" (démo)`,
       options: ["Réponse A", "Réponse B", "Réponse C", "Réponse D"],
       correct: Math.floor(Math.random() * 4),
       explanation: "Ceci est une question de démonstration.",
     });
   }
+
   return questions;
 }
 
-// ─── Broadcast to room ───
-function broadcastToRoom(roomCode, message, excludeWs = null) {
-  const msg = JSON.stringify(message);
-  for (const [ws, info] of clients.entries()) {
-    if (info.roomCode === roomCode && ws !== excludeWs && ws.readyState === WebSocket.OPEN) {
-      ws.send(msg);
+// ───────────────────────────────────────────────────
+// Room lifecycle
+// ───────────────────────────────────────────────────
+
+function promoteNewHostIfNeeded(roomCode, oldHostName) {
+  const room = rooms.get(roomCode);
+  if (!room) return;
+
+  if (room.host !== oldHostName) return;
+  if (room.players.length === 0) return;
+
+  room.host = room.players[0].name;
+  touchRoom(room);
+
+  broadcastToRoom(roomCode, {
+    type: "host_changed",
+    host: room.host,
+    players: getPublicPlayers(room),
+  });
+
+  console.log(`👑 Nouvel host dans ${roomCode}: ${room.host}`);
+}
+
+function handleDisconnect(ws) {
+  const info = clients.get(ws);
+  if (!info) return;
+
+  const { name, roomCode } = info;
+
+  if (roomCode) {
+    const room = rooms.get(roomCode);
+
+    if (room) {
+      room.players = room.players.filter((p) => p.name !== name);
+      delete room.answersThisRound[name];
+      touchRoom(room);
+
+      if (room.players.length === 0) {
+        rooms.delete(roomCode);
+        console.log(`🗑️ Salle ${roomCode} supprimée (vide)`);
+      } else {
+        const wasHost = room.host === name;
+
+        if (wasHost) {
+          promoteNewHostIfNeeded(roomCode, name);
+        }
+
+        broadcastToRoom(roomCode, {
+          type: "player_left",
+          leftPlayer: name,
+          players: getPublicPlayers(room),
+          host: room.host,
+        });
+      }
     }
   }
+
+  clients.delete(ws);
 }
 
-function sendTo(ws, message) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(message));
-  }
-}
+// ───────────────────────────────────────────────────
+// WebSocket
+// ───────────────────────────────────────────────────
 
-// ─── WebSocket Handler ───
 wss.on("connection", (ws) => {
-  clients.set(ws, { name: null, roomCode: null });
+  clients.set(ws, {
+    name: null,
+    roomCode: null,
+    isAlive: true,
+  });
+
+  ws.on("pong", () => {
+    const info = clients.get(ws);
+    if (info) info.isAlive = true;
+  });
 
   ws.on("message", async (raw) => {
     let msg;
     try {
-      msg = JSON.parse(raw);
+      msg = JSON.parse(raw.toString());
     } catch {
-      return;
+      return sendTo(ws, { type: "error", message: "Message JSON invalide." });
     }
 
     const info = clients.get(ws);
+    if (!info) return;
 
-    switch (msg.type) {
-      // ─── CREATE ROOM ───
-      case "create_room": {
-        const { playerName, topic, questionCount } = msg;
-        if (!playerName || !topic) return;
+    try {
+      switch (msg.type) {
+        // ───────────────── CREATE ROOM ─────────────────
+        case "create_room": {
+          const playerName = sanitizePlayerName(msg.playerName);
+          const topic = sanitizeTopic(msg.topic);
+          const questionCount = sanitizeQuestionCount(msg.questionCount);
 
-        const room = createRoom(playerName, topic, questionCount || 10);
-        info.name = playerName;
-        info.roomCode = room.code;
+          if (!playerName) {
+            return sendTo(ws, { type: "error", message: "Pseudo invalide." });
+          }
 
-        sendTo(ws, {
-          type: "room_created",
-          roomCode: room.code,
-          players: room.players,
-          topic: room.topic,
-        });
+          if (!topic) {
+            return sendTo(ws, { type: "error", message: "Sujet invalide." });
+          }
 
-        console.log(`🏠 Salle ${room.code} créée par ${playerName} (${topic}, ${room.questionCount}q)`);
-        break;
-      }
+          const room = createRoom(playerName, topic, questionCount);
 
-      // ─── JOIN ROOM ───
-      case "join_room": {
-        const { playerName, roomCode } = msg;
-        const code = roomCode?.toUpperCase();
-        const room = rooms.get(code);
+          info.name = playerName;
+          info.roomCode = room.code;
 
-        if (!room) {
-          sendTo(ws, { type: "error", message: "Salle introuvable. Vérifie le code." });
-          return;
-        }
-        if (room.state !== "lobby") {
-          sendTo(ws, { type: "error", message: "La partie a déjà commencé." });
-          return;
-        }
-        if (room.players.find((p) => p.name === playerName)) {
-          sendTo(ws, { type: "error", message: "Ce pseudo est déjà pris dans cette salle." });
-          return;
-        }
-
-        room.players.push({ name: playerName, score: 0, finished: false });
-        info.name = playerName;
-        info.roomCode = code;
-
-        sendTo(ws, {
-          type: "room_joined",
-          roomCode: code,
-          players: room.players,
-          topic: room.topic,
-          host: room.host,
-        });
-
-        broadcastToRoom(code, {
-          type: "player_joined",
-          players: room.players,
-          newPlayer: playerName,
-        }, ws);
-
-        console.log(`👤 ${playerName} a rejoint ${code} (${room.players.length} joueurs)`);
-        break;
-      }
-
-      // ─── START GAME ───
-      case "start_game": {
-        const room = rooms.get(info.roomCode);
-        if (!room || room.host !== info.name) return;
-
-        room.state = "generating";
-        broadcastToRoom(info.roomCode, { type: "generating" });
-
-        console.log(`🧠 Génération des questions pour ${info.roomCode}...`);
-        const questions = await generateQuestions(room.topic, room.questionCount);
-        room.questions = questions;
-        room.state = "playing";
-        room.currentQuestion = 0;
-        room.answersThisRound = {};
-
-        // Send questions WITHOUT correct answers to players
-        const safeQuestions = questions.map((q) => ({
-          question: q.question,
-          options: q.options,
-        }));
-
-        broadcastToRoom(info.roomCode, {
-          type: "game_start",
-          questions: safeQuestions,
-          totalQuestions: questions.length,
-        });
-
-        // Also send to host
-        sendTo(ws, {
-          type: "game_start",
-          questions: safeQuestions,
-          totalQuestions: questions.length,
-        });
-
-        console.log(`🎮 Partie lancée dans ${info.roomCode} (${questions.length} questions)`);
-        break;
-      }
-
-      // ─── SUBMIT ANSWER ───
-      case "submit_answer": {
-        const { questionIndex, answerIndex, timeLeft } = msg;
-        const room = rooms.get(info.roomCode);
-        if (!room || room.state !== "playing") return;
-
-        const q = room.questions[questionIndex];
-        if (!q) return;
-        
-        // Prevent double answers
-        if (room.answersThisRound[info.name]) return;
-
-        const correct = answerIndex === q.correct;
-        const timeBonus = Math.round((timeLeft / 15) * 500);
-        const points = correct ? 1000 + timeBonus : 0;
-
-        const player = room.players.find((p) => p.name === info.name);
-        if (player) player.score += points;
-        
-        // Store answer for this round
-        room.answersThisRound[info.name] = { answerIndex, timeLeft, correct, points };
-
-        // Send result to the player who answered
-        sendTo(ws, {
-          type: "answer_result",
-          questionIndex,
-          correct,
-          correctAnswer: q.correct,
-          explanation: q.explanation,
-          points,
-          totalScore: player?.score || 0,
-        });
-
-        // Broadcast live answer status to everyone (who answered, correct or not)
-        const answerStatus = {};
-        for (const [name, ans] of Object.entries(room.answersThisRound)) {
-          answerStatus[name] = { answered: true, correct: ans.correct };
-        }
-        
-        broadcastToRoom(info.roomCode, {
-          type: "live_answers",
-          answerStatus,
-          totalPlayers: room.players.length,
-          answeredCount: Object.keys(room.answersThisRound).length,
-        });
-        // Also send to answerer
-        sendTo(ws, {
-          type: "live_answers",
-          answerStatus,
-          totalPlayers: room.players.length,
-          answeredCount: Object.keys(room.answersThisRound).length,
-        });
-
-        // Broadcast updated scores
-        const scores = room.players.map((p) => ({ name: p.name, score: p.score }));
-        broadcastToRoom(info.roomCode, { type: "score_update", scores });
-        sendTo(ws, { type: "score_update", scores });
-
-        break;
-      }
-
-      // ─── NEXT QUESTION (host only) ───
-      case "next_question": {
-        const room = rooms.get(info.roomCode);
-        if (!room || room.host !== info.name || room.state !== "playing") return;
-        
-        room.currentQuestion++;
-        room.answersThisRound = {}; // Reset answers for new round
-        
-        if (room.currentQuestion >= room.questions.length) {
-          // Game over
-          room.state = "results";
-          const leaderboard = [...room.players].sort((a, b) => b.score - a.score);
-          broadcastToRoom(info.roomCode, { type: "final_results", leaderboard });
-          sendTo(ws, { type: "final_results", leaderboard });
-          console.log(`🏆 Partie terminée dans ${info.roomCode}`);
-        } else {
-          // Send next question to everyone
-          broadcastToRoom(info.roomCode, { 
-            type: "next_question", 
-            questionIndex: room.currentQuestion 
+          sendTo(ws, {
+            type: "room_created",
+            roomCode: room.code,
+            players: getPublicPlayers(room),
+            topic: room.topic,
+            host: room.host,
+            questionCount: room.questionCount,
           });
-          sendTo(ws, { 
-            type: "next_question", 
-            questionIndex: room.currentQuestion 
+
+          console.log(`🏠 Salle ${room.code} créée par ${playerName} (${topic}, ${room.questionCount}q)`);
+          break;
+        }
+
+        // ───────────────── JOIN ROOM ─────────────────
+        case "join_room": {
+          const playerName = sanitizePlayerName(msg.playerName);
+          const roomCode = typeof msg.roomCode === "string" ? msg.roomCode.trim().toUpperCase() : "";
+          const room = rooms.get(roomCode);
+
+          if (!playerName) {
+            return sendTo(ws, { type: "error", message: "Pseudo invalide." });
+          }
+
+          if (!room) {
+            return sendTo(ws, { type: "error", message: "Salle introuvable. Vérifie le code." });
+          }
+
+          if (room.state !== "lobby") {
+            return sendTo(ws, { type: "error", message: "La partie a déjà commencé." });
+          }
+
+          if (room.players.some((p) => p.name.toLowerCase() === playerName.toLowerCase())) {
+            return sendTo(ws, { type: "error", message: "Ce pseudo est déjà pris dans cette salle." });
+          }
+
+          room.players.push({
+            name: playerName,
+            score: 0,
+            finished: false,
           });
-          console.log(`➡️ Question ${room.currentQuestion + 1} dans ${info.roomCode}`);
+          touchRoom(room);
+
+          info.name = playerName;
+          info.roomCode = roomCode;
+
+          sendTo(ws, {
+            type: "room_joined",
+            roomCode,
+            players: getPublicPlayers(room),
+            topic: room.topic,
+            host: room.host,
+            questionCount: room.questionCount,
+          });
+
+          broadcastToRoom(
+            roomCode,
+            {
+              type: "player_joined",
+              newPlayer: playerName,
+              players: getPublicPlayers(room),
+              host: room.host,
+            },
+            ws
+          );
+
+          console.log(`👤 ${playerName} a rejoint ${roomCode} (${room.players.length} joueurs)`);
+          break;
         }
-        break;
-      }
 
-      // ─── PLAYER FINISHED (solo mode) ───
-      case "player_finished": {
-        const room = rooms.get(info.roomCode);
-        if (!room) return;
+        // ───────────────── START GAME ─────────────────
+        case "start_game": {
+          const room = rooms.get(info.roomCode);
 
-        const player = room.players.find((p) => p.name === info.name);
-        if (player) player.finished = true;
+          if (!room) return;
+          if (room.host !== info.name) return;
+          if (room.state !== "lobby") return;
 
-        // In solo mode, finish immediately
-        if (room.players.length === 1) {
-          room.state = "results";
-          const leaderboard = [...room.players].sort((a, b) => b.score - a.score);
-          sendTo(ws, { type: "final_results", leaderboard });
+          room.state = "generating";
+          room.currentQuestion = 0;
+          room.answersThisRound = {};
+          touchRoom(room);
+
+          broadcastToRoom(info.roomCode, { type: "generating" });
+
+          console.log(`🧠 Génération des questions pour ${info.roomCode}...`);
+
+          const questions = await generateQuestions(room.topic, room.questionCount);
+
+          room.questions = Array.isArray(questions) ? questions : generateDemoQuestions(room.topic, room.questionCount);
+          room.state = "playing";
+          room.currentQuestion = 0;
+          room.answersThisRound = {};
+          touchRoom(room);
+
+          const safeQuestions = room.questions.map((q) => ({
+            question: q.question,
+            options: q.options,
+          }));
+
+          broadcastToRoom(info.roomCode, {
+            type: "game_start",
+            questions: safeQuestions,
+            totalQuestions: safeQuestions.length,
+            questionIndex: 0,
+          });
+
+          console.log(`🎮 Partie lancée dans ${info.roomCode} (${safeQuestions.length} questions)`);
+          break;
         }
 
-        break;
-      }
+        // ───────────────── SUBMIT ANSWER ─────────────────
+        case "submit_answer": {
+          const room = rooms.get(info.roomCode);
 
-      // ─── LEAVE ───
-      case "leave": {
-        handleDisconnect(ws);
-        break;
+          if (!room) return;
+          if (room.state !== "playing") return;
+          if (!info.name) return;
+
+          const questionIndex = Number(msg.questionIndex);
+          const answerIndex = sanitizeAnswerIndex(msg.answerIndex);
+          const timeLeft = sanitizeTimeLeft(msg.timeLeft);
+
+          if (!Number.isInteger(questionIndex)) return;
+          if (questionIndex !== room.currentQuestion) return;
+          if (answerIndex < 0 || answerIndex > 3) return;
+
+          const q = room.questions[questionIndex];
+          if (!q) return;
+
+          if (room.answersThisRound[info.name]) return;
+
+          const correct = answerIndex === q.correct;
+          const timeBonus = Math.round((timeLeft / 15) * 500);
+          const points = correct ? 1000 + timeBonus : 0;
+
+          const player = findPlayer(room, info.name);
+          if (!player) return;
+
+          player.score += points;
+          touchRoom(room);
+
+          room.answersThisRound[info.name] = {
+            answerIndex,
+            timeLeft,
+            correct,
+            points,
+          };
+
+          sendTo(ws, {
+            type: "answer_result",
+            questionIndex,
+            correct,
+            correctAnswer: q.correct,
+            explanation: q.explanation,
+            points,
+            totalScore: player.score,
+          });
+
+          const answerStatus = {};
+          for (const [name, ans] of Object.entries(room.answersThisRound)) {
+            answerStatus[name] = {
+              answered: true,
+              correct: ans.correct,
+            };
+          }
+
+          broadcastToRoom(info.roomCode, {
+            type: "live_answers",
+            answerStatus,
+            totalPlayers: room.players.length,
+            answeredCount: Object.keys(room.answersThisRound).length,
+          });
+
+          broadcastToRoom(info.roomCode, {
+            type: "score_update",
+            scores: getScoreboard(room),
+          });
+
+          break;
+        }
+
+        // ───────────────── NEXT QUESTION ─────────────────
+        case "next_question": {
+          const room = rooms.get(info.roomCode);
+
+          if (!room) return;
+          if (room.host !== info.name) return;
+          if (room.state !== "playing") return;
+
+          room.currentQuestion += 1;
+          room.answersThisRound = {};
+          touchRoom(room);
+
+          if (room.currentQuestion >= room.questions.length) {
+            room.state = "results";
+            touchRoom(room);
+
+            broadcastToRoom(info.roomCode, {
+              type: "final_results",
+              leaderboard: getLeaderboard(room),
+            });
+
+            console.log(`🏆 Partie terminée dans ${info.roomCode}`);
+          } else {
+            broadcastToRoom(info.roomCode, {
+              type: "next_question",
+              questionIndex: room.currentQuestion,
+            });
+
+            console.log(`➡️ Question ${room.currentQuestion + 1} dans ${info.roomCode}`);
+          }
+
+          break;
+        }
+
+        // ───────────────── PLAYER FINISHED ─────────────────
+        case "player_finished": {
+          const room = rooms.get(info.roomCode);
+          if (!room) return;
+
+          const player = findPlayer(room, info.name);
+          if (!player) return;
+
+          player.finished = true;
+          touchRoom(room);
+
+          if (room.players.length === 1) {
+            room.state = "results";
+            touchRoom(room);
+
+            sendTo(ws, {
+              type: "final_results",
+              leaderboard: getLeaderboard(room),
+            });
+          }
+
+          break;
+        }
+
+        // ───────────────── LEAVE ─────────────────
+        case "leave": {
+          handleDisconnect(ws);
+          try {
+            ws.close();
+          } catch (_) {}
+          break;
+        }
+
+        default: {
+          sendTo(ws, { type: "error", message: "Type de message inconnu." });
+          break;
+        }
       }
+    } catch (err) {
+      console.error("Erreur traitement message WS:", err);
+      sendTo(ws, { type: "error", message: "Erreur serveur." });
     }
   });
 
-  ws.on("close", () => handleDisconnect(ws));
+  ws.on("close", () => {
+    handleDisconnect(ws);
+  });
+
+  ws.on("error", (err) => {
+    console.error("Erreur WebSocket:", err.message);
+  });
 });
 
-function handleDisconnect(ws) {
-  const info = clients.get(ws);
-  if (info && info.roomCode) {
-    const room = rooms.get(info.roomCode);
-    if (room) {
-      room.players = room.players.filter((p) => p.name !== info.name);
-      if (room.players.length === 0) {
-        rooms.delete(info.roomCode);
-        console.log(`🗑️  Salle ${info.roomCode} supprimée (vide)`);
-      } else {
-        broadcastToRoom(info.roomCode, {
-          type: "player_left",
-          players: room.players,
-          leftPlayer: info.name,
-        });
-      }
-    }
-  }
-  clients.delete(ws);
-}
+// ───────────────────────────────────────────────────
+// Heartbeat WS
+// ───────────────────────────────────────────────────
 
-// ─── Cleanup old rooms every 30 min ───
+const heartbeatInterval = setInterval(() => {
+  for (const [ws, info] of clients.entries()) {
+    if (info.isAlive === false) {
+      try {
+        ws.terminate();
+      } catch (_) {}
+      handleDisconnect(ws);
+      continue;
+    }
+
+    info.isAlive = false;
+
+    try {
+      ws.ping();
+    } catch (_) {}
+  }
+}, 30000);
+
+wss.on("close", () => {
+  clearInterval(heartbeatInterval);
+});
+
+// ───────────────────────────────────────────────────
+// Cleanup old rooms
+// ───────────────────────────────────────────────────
+
 setInterval(() => {
   const now = Date.now();
+
   for (const [code, room] of rooms.entries()) {
-    if (now - room.createdAt > 3600000) { // 1h
+    const inactiveTooLong = now - room.updatedAt > 60 * 60 * 1000;
+    if (inactiveTooLong) {
       rooms.delete(code);
-      console.log(`🧹 Salle ${code} nettoyée (expirée)`);
+      console.log(`🧹 Salle ${code} nettoyée (inactive/expirée)`);
     }
   }
-}, 1800000);
+}, 30 * 60 * 1000);
 
-// ─── Serve static files ───
+// ───────────────────────────────────────────────────
+// HTTP
+// ───────────────────────────────────────────────────
+
 app.use(express.static(path.join(__dirname, "public")));
 
-// ─── API endpoint for room info ───
 app.get("/api/room/:code", (req, res) => {
-  const room = rooms.get(req.params.code?.toUpperCase());
-  if (!room) return res.status(404).json({ error: "Salle introuvable" });
-  res.json({
+  const code = typeof req.params.code === "string" ? req.params.code.toUpperCase() : "";
+  const room = rooms.get(code);
+
+  if (!room) {
+    return res.status(404).json({ error: "Salle introuvable" });
+  }
+
+  return res.json({
     code: room.code,
     topic: room.topic,
     playerCount: room.players.length,
     state: room.state,
+    host: room.host,
+    questionCount: room.questionCount,
   });
 });
 
-// ─── Start ───
+app.get("/health", (_req, res) => {
+  res.json({
+    ok: true,
+    rooms: rooms.size,
+    clients: clients.size,
+    uptime: process.uptime(),
+  });
+});
+
+// ───────────────────────────────────────────────────
+// Start
+// ───────────────────────────────────────────────────
+
 server.listen(PORT, () => {
   console.log(`
-  ╔═══════════════════════════════════════╗
-  ║         🧠 QUIZIMED SERVER 🧠         ║
-  ╠═══════════════════════════════════════╣
-  ║                                       ║
-  ║  Serveur lancé sur le port ${String(PORT).padEnd(5)}      ║
-  ║  http://localhost:${String(PORT).padEnd(5)}               ║
-  ║                                       ║
-  ${OPENROUTER_API_KEY ? "║  ✅ Clé API OpenRouter configurée      ║" : "║  ⚠️  Pas de clé API → mode démo        ║"}
-  ║                                       ║
-  ╚═══════════════════════════════════════╝
+╔═══════════════════════════════════════╗
+║         🧠 QUIZIMED SERVER 🧠         ║
+╠═══════════════════════════════════════╣
+║                                       ║
+║  Serveur lancé sur le port ${String(PORT).padEnd(5)}      ║
+║  http://localhost:${String(PORT).padEnd(5)}               ║
+║                                       ║
+${OPENROUTER_API_KEY
+  ? "║  ✅ Clé API OpenRouter configurée      ║"
+  : "║  ⚠️  Pas de clé API → mode démo        ║"}
+║                                       ║
+╚═══════════════════════════════════════╝
   `);
 });
