@@ -27,32 +27,95 @@ function createRoom(host, topic, count) {
   return room;
 }
 
+// ─── Web Search ───
+async function searchTopic(topic) {
+  try {
+    console.log(`🔍 Recherche web: "${topic}"...`);
+    // Use Wikipedia API - free, no key needed, reliable facts
+    const searches = [topic, topic + " discographie", topic + " biographie", topic + " faits"];
+    let allText = "";
+    
+    for (const q of searches.slice(0, 2)) {
+      try {
+        const searchUrl = `https://fr.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(q)}`;
+        const res = await fetch(searchUrl);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.extract) allText += data.extract + "\n\n";
+        }
+      } catch {}
+      
+      // Also try Wikipedia search API for better matching
+      try {
+        const searchApi = `https://fr.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&format=json&utf8=1&srlimit=3`;
+        const res = await fetch(searchApi);
+        if (res.ok) {
+          const data = await res.json();
+          const titles = data.query?.search?.map(s => s.title) || [];
+          for (const title of titles.slice(0, 2)) {
+            try {
+              const pageRes = await fetch(`https://fr.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
+              if (pageRes.ok) {
+                const pageData = await pageRes.json();
+                if (pageData.extract && !allText.includes(pageData.extract)) {
+                  allText += pageData.extract + "\n\n";
+                }
+              }
+            } catch {}
+          }
+        }
+      } catch {}
+    }
+
+    // Also fetch from English Wikipedia for broader coverage
+    try {
+      const enRes = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topic)}`);
+      if (enRes.ok) {
+        const enData = await enRes.json();
+        if (enData.extract) allText += "[EN] " + enData.extract + "\n\n";
+      }
+    } catch {}
+
+    const trimmed = allText.trim().substring(0, 4000); // Limit to 4000 chars
+    console.log(`📚 ${trimmed.length} chars de contexte trouvés`);
+    return trimmed;
+  } catch (err) {
+    console.log(`⚠️ Recherche échouée: ${err.message}`);
+    return "";
+  }
+}
+
 // ─── AI ───
 async function generateQuestions(topic, count) {
   if (!API_KEY) return demoQs(topic, count);
+  
+  // Step 1: Search for real facts about the topic
+  const facts = await searchTopic(topic);
+  
+  const contextBlock = facts 
+    ? `\nVOICI DES INFORMATIONS VÉRIFIÉES SUR LE SUJET (source: Wikipedia):\n---\n${facts}\n---\nBase tes questions PRIORITAIREMENT sur ces informations. Tu peux aussi utiliser tes connaissances si elles sont fiables, mais les infos ci-dessus sont ta source principale.\n`
+    : "\nAucune info trouvée en ligne. Base-toi uniquement sur des faits dont tu es ABSOLUMENT certain.\n";
+
   const prompt = `RÔLE: Tu es un professeur expert qui crée des quiz de culture générale pour un jeu télévisé. Tes questions doivent être IRRÉPROCHABLES en termes d'exactitude.
 
 SUJET: "${topic}"
 NOMBRE: Exactement ${count} questions
-
+${contextBlock}
 INSTRUCTIONS STRICTES:
-- Base-toi UNIQUEMENT sur des faits réels, vérifiés et largement reconnus
-- Pour les artistes/musiciens: utilise des faits sur leurs albums, singles, récompenses, collaborations, dates de sortie, records — des choses VÉRIFIABLES
-- Pour les sujets scientifiques: utilise des faits établis et consensus scientifique
-- Pour l'histoire: utilise des dates et événements documentés
+- Base-toi sur les FAITS RÉELS fournis ci-dessus
 - INTERDICTION d'inventer des chiffres, des dates, des classements ou des records
-- Si une information est incertaine, NE PAS l'inclure — choisis un autre fait
-- La bonne réponse doit être INDISCUTABLE — pas d'ambiguïté possible
+- Si une information est incertaine, NE PAS l'inclure
+- La bonne réponse doit être INDISCUTABLE
 - Les 3 mauvaises réponses doivent être du même type que la bonne (si la bonne est un album, les mauvaises sont aussi des albums, etc.)
-- Les mauvaises réponses doivent être FAUSSES mais CRÉDIBLES (pas absurdes)
-- Mélange les difficultés: des questions faciles que tout fan connaît, des moyennes, et des difficiles pour les experts
-- Chaque question doit tester une connaissance DIFFÉRENTE (pas 5 questions sur les albums)
+- Les mauvaises réponses doivent être FAUSSES mais CRÉDIBLES
+- Mélange les difficultés: facile, moyen, difficile
+- Chaque question doit tester une connaissance DIFFÉRENTE
 - Questions et réponses en FRANÇAIS
 
-FORMAT: Réponds UNIQUEMENT avec un tableau JSON valide. Pas de texte avant, pas de texte après, pas de backticks, pas de commentaires.
-[{"question":"La question précise ici ?","options":["Bonne réponse","Mauvaise 1","Mauvaise 2","Mauvaise 3"],"correct":0,"explanation":"Explication factuelle courte"}]
+FORMAT: Réponds UNIQUEMENT avec un tableau JSON valide. Pas de texte avant, pas de texte après, pas de backticks.
+[{"question":"La question ?","options":["A","B","C","D"],"correct":0,"explanation":"Explication courte"}]
 
-ATTENTION: Le champ "correct" est l'INDEX (0, 1, 2 ou 3) de la bonne réponse dans le tableau "options". MÉLANGE la position de la bonne réponse — ne mets PAS toujours la bonne réponse en premier !`;
+Le champ "correct" est l'INDEX (0-3) de la bonne réponse. MÉLANGE la position de la bonne réponse !`;
 
   const models = ["openrouter/free","qwen/qwen3-coder:free","nvidia/nemotron-3-super-120b-a12b:free","meta-llama/llama-3.3-70b-instruct:free","stepfun/step-3.5-flash:free"];
   for (const model of models) {
