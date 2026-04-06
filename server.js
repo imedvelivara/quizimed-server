@@ -14,7 +14,7 @@
 //
 // Variables d'environnement :
 //   PORT           - Port du serveur (défaut: 3000)
-//   GEMINI_API_KEY - Clé API Google Gemini (GRATUIT sur aistudio.google.com)
+//   OPENROUTER_API_KEY - Clé API OpenRouter (GRATUIT sur openrouter.ai)
 //
 // ═══════════════════════════════════════════════════
 
@@ -29,7 +29,7 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const PORT = process.env.PORT || 3000;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 
 // ─── In-memory storage ───
 const rooms = new Map();    // roomCode -> Room
@@ -61,12 +61,12 @@ function generateRoomCode() {
   return code;
 }
 
-// ─── AI Question Generation (Google Gemini - 100% GRATUIT) ───
+// ─── AI Question Generation (OpenRouter - modèles gratuits) ───
 async function generateQuestions(topic, count) {
-  console.log(`🔑 GEMINI_API_KEY présente: ${GEMINI_API_KEY ? "OUI (" + GEMINI_API_KEY.substring(0, 10) + "...)" : "NON"}`);
+  console.log(`🔑 OPENROUTER_API_KEY présente: ${OPENROUTER_API_KEY ? "OUI" : "NON"}`);
   
-  if (!GEMINI_API_KEY) {
-    console.log("⚠️  Pas de clé GEMINI_API_KEY - utilisation de questions de démonstration");
+  if (!OPENROUTER_API_KEY) {
+    console.log("⚠️  Pas de clé OPENROUTER_API_KEY - utilisation de questions de démonstration");
     return generateDemoQuestions(topic, count);
   }
 
@@ -88,57 +88,59 @@ Le champ "correct" est l'index (0-3) de la bonne réponse.
 Questions variées en difficulté. Mauvaises réponses plausibles.
 Exactement 4 options par question. Les questions doivent être en français.`;
 
-  try {
-    console.log("📡 Appel à Gemini en cours...");
-    
-    // Try multiple models - gemini-1.5-flash has the best free quota
-    const models = ["gemini-1.5-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash"];
-    
-    for (const model of models) {
-      console.log(`🤖 Essai avec ${model}...`);
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.8,
-            maxOutputTokens: 8000,
-          },
-        }),
-      }
-    );
+  // Modèles gratuits sur OpenRouter (essayés dans l'ordre)
+  const models = [
+    "meta-llama/llama-4-maverick:free",
+    "meta-llama/llama-4-scout:free",
+    "google/gemini-2.0-flash-exp:free",
+    "deepseek/deepseek-chat-v3-0324:free",
+    "qwen/qwen3-235b-a22b:free"
+  ];
 
-    const data = await response.json();
+  for (const model of models) {
+    try {
+      console.log(`🤖 Essai avec ${model}...`);
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.8,
+          max_tokens: 8000,
+        }),
+      });
+
+      const data = await response.json();
       console.log(`📨 Réponse ${model} status:`, response.status);
-      
+
       if (!response.ok) {
-        console.error(`⚠️ ${model} échoué:`, data.error?.message || "erreur inconnue");
-        continue; // try next model
+        console.error(`⚠️ ${model} échoué:`, data.error?.message || JSON.stringify(data));
+        continue;
       }
-      
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+      const text = data.choices?.[0]?.message?.content || "";
       console.log("✅ Réponse reçue, longueur:", text.length);
       const clean = text.replace(/```json|```/g, "").trim();
       return JSON.parse(clean);
+    } catch (err) {
+      console.error(`⚠️ ${model} erreur:`, err.message);
+      continue;
     }
-    
-    // All models failed
-    console.error("❌ Tous les modèles ont échoué");
-    return generateDemoQuestions(topic, count);
-  } catch (err) {
-    console.error("❌ Erreur génération:", err);
-    return generateDemoQuestions(topic, count);
   }
+
+  console.error("❌ Tous les modèles ont échoué");
+  return generateDemoQuestions(topic, count);
 }
 
 function generateDemoQuestions(topic, count) {
   const questions = [];
   for (let i = 0; i < count; i++) {
     questions.push({
-      question: `Question ${i + 1} sur "${topic}" (démo - ajoutez GEMINI_API_KEY pour de vraies questions)`,
+      question: `Question ${i + 1} sur "${topic}" (démo - ajoutez OPENROUTER_API_KEY pour de vraies questions)`,
       options: ["Réponse A", "Réponse B", "Réponse C", "Réponse D"],
       correct: Math.floor(Math.random() * 4),
       explanation: "Ceci est une question de démonstration.",
@@ -399,7 +401,7 @@ server.listen(PORT, () => {
   ║  Serveur lancé sur le port ${String(PORT).padEnd(5)}      ║
   ║  http://localhost:${String(PORT).padEnd(5)}               ║
   ║                                       ║
-  ${GEMINI_API_KEY ? "║  ✅ Clé API Gemini configurée          ║" : "║  ⚠️  Pas de clé API → mode démo        ║"}
+  ${OPENROUTER_API_KEY ? "║  ✅ Clé API OpenRouter configurée      ║" : "║  ⚠️  Pas de clé API → mode démo        ║"}
   ║                                       ║
   ╚═══════════════════════════════════════╝
   `);
